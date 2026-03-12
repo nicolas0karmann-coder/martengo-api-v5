@@ -824,15 +824,16 @@ def notes_pmu():
     # pour le réentraînement futur (V6).
     # ════════════════════════════════════════════════════════════
 
-    # Prédiction V5 (conservé pour debug/comparaison)
-    probas_v5 = _model_pmu.predict_proba(df_nc[_features_pmu])[:, 1]
-
     # V6 : note basée uniquement sur les 6 scores métier équilibrés
     SCORES_V6 = ['score_forme', 'score_duo', 'score_historique',
                  'score_gains', 'score_adequation', 'score_cote']
     POIDS_V6  = [0.21, 0.17, 0.14, 0.08, 0.26, 0.11]
 
     score_metier = sum(df_nc[s] * p for s, p in zip(SCORES_V6, POIDS_V6))
+    df_nc['score_metier'] = score_metier
+
+    # Prédiction via modèle (V5 ou V6 selon le pkl chargé)
+    probas_v5 = _model_pmu.predict_proba(df_nc[_features_pmu])[:, 1]
 
     df_nc['proba_pmu']    = score_metier
     df_nc['proba_pmu_v5'] = probas_v5
