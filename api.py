@@ -861,6 +861,22 @@ def notes_pmu():
 
 
 # ============================================================
+# TÉLÉCHARGEMENT CSV
+# ============================================================
+@app.route('/download_historique', methods=['GET'])
+def download_historique():
+    from flask import send_file
+    if os.path.exists(HISTORIQUE_PATH):
+        return send_file(
+            HISTORIQUE_PATH,
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name='historique_notes.csv'
+        )
+    else:
+        return jsonify({"error": "Fichier non trouvé"}), 404
+
+# ============================================================
 # DÉMARRAGE
 # ============================================================
 _charger_modele_pmu()
