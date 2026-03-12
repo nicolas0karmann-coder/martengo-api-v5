@@ -476,49 +476,7 @@ def _proba_to_note_api(proba_series):
     return pd.Series(proba_series).apply(_convert)
 
 
-def _scores_to_notes_percentile(score_series):
-    """
-    Convertit les scores métier en notes 1-20 par percentile dans la course.
-    - Respecte les vraies différences : deux chevaux proches → notes proches
-    - Pas d'étirement artificiel
-    - Basé sur la distribution réelle des scores dans le peloton
-    """
-    s = pd.Series(score_series).fillna(0.5)
-    n = len(s)
-    if n <= 1:
-        return pd.Series([10] * n, index=s.index)
 
-    # Percentile de chaque cheval dans sa course (0 = dernier, 1 = premier)
-    pct = s.rank(pct=True, method='average')
-
-    # Conversion percentile → note via courbe non-linéaire
-    # Favorise la différenciation en haut (top chevaux bien séparés)
-    # et compresse le bas (les outsiders se ressemblent)
-    notes = (1 + 19 * (pct ** 0.7)).round().astype(int).clip(1, 20)
-
-    return notes
-
-def _scores_to_notes(score_series):
-    """
-    Convertit les scores métier (0-1) en notes 1-20 par rang relatif dans la course.
-    Garantit une bonne différenciation même quand les scores sont proches.
-    Le meilleur cheval obtient toujours une note élevée, le moins bon une note basse.
-    """
-    s = pd.Series(score_series)
-    n = len(s)
-    if n == 0:
-        return s
-
-    # Rang : 1 = meilleur score
-    rangs = s.rank(ascending=False, method='min')
-
-    # Étirement linéaire : rang 1 → note max, rang n → note min
-    # Note max dépend du nombre de partants (plus il y a de chevaux, plus le favori se démarque)
-    note_max = min(20, 12 + max(0, n - 6))   # 6 chevaux → 18, 16 chevaux → 20
-    note_min = max(1,  note_max - n - 2)      # écart suffisant entre premier et dernier
-
-    notes = note_max - (rangs - 1) * (note_max - note_min) / (n - 1 + 1e-9)
-    return notes.round().astype(int).clip(1, 20)
 
 
 @app.route('/notes_pmu', methods=['GET'])
@@ -872,12 +830,13 @@ def notes_pmu():
     # V6 : note basée uniquement sur les 6 scores métier équilibrés
     SCORES_V6 = ['score_forme', 'score_duo', 'score_historique',
                  'score_gains', 'score_adequation', 'score_cote']
+    POIDS_V6  = [0.30, 0.25, 0.20, 0.12, 0.03, 0.10]
 
-    score_metier = df_nc[SCORES_V6].mean(axis=1)  # moyenne équipondérée des 6
+    score_metier = sum(df_nc[s] * p for s, p in zip(SCORES_V6, POIDS_V6))
 
     df_nc['proba_pmu']    = score_metier
     df_nc['proba_pmu_v5'] = probas_v5
-    df_nc['note_pmu']     = _scores_to_notes_percentile(score_metier)
+    df_nc['note_pmu']     = _proba_to_note_api(score_metier)
 
     # ── Plancher note par cote (inchangé) ─────────────────────
     def _plancher_cote(cote):
