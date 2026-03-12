@@ -781,13 +781,15 @@ def notes_pmu():
     # Signal du marché PMU — présent mais non dominant
     s_cote_rang  = 1 - df_nc['rang_cote_norme']               # rang inversé : favori = 1
     s_ecart      = _norm(-df_nc['ecart_cotes'].abs(), -10, 0) # petite déviation live/ref = bon signe
-    s_temps      = _norm(1 / (1 + df_nc['temps_norme'].fillna(df_nc['temps_norme'].median())), 0, 1)
+    _med_temps   = df_nc['temps_norme'].median()
+    _med_temps   = _med_temps if pd.notna(_med_temps) else 0.0
+    s_temps      = _norm(1 / (1 + df_nc['temps_norme'].fillna(_med_temps)), 0, 1)
 
     df_nc['score_cote'] = (
         s_cote_rang * 0.60 +
         s_ecart     * 0.25 +
         s_temps     * 0.15
-    ).clip(0, 1)
+    ).clip(0, 1).fillna(s_cote_rang.clip(0, 1))  # fallback sur rang seul si NaN
 
     # ════════════════════════════════════════════════════════════
     # ÉTAPE 2 — XGBOOST sur les 6 scores équilibrés
