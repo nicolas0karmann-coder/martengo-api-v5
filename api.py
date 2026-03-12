@@ -834,18 +834,18 @@ def notes_pmu():
             "numero":    int(row['numero']),
             "nom":       str(row['nom']),
             "note_pmu":  int(row['note_pmu']),
-            "proba_pmu": round(float(row['proba_pmu']) * 100, 1),
+            "proba_pmu": round(float(row['proba_pmu']) * 100, 1) if pd.notna(row['proba_pmu']) else 0,
             "driver":    str(row['driver']),
-            "cote":      float(row['_cote_app']) if row['_cote_app'] is not None else None,
-            "avis":      int(row['avis_entraineur']),
+            "cote":      float(row['_cote_app']) if pd.notna(row['_cote_app']) else None,
+            "avis":      int(row['avis_entraineur']) if pd.notna(row['avis_entraineur']) else 0,
             # ✨ V6 — scores détaillés par dimension (0-100)
             "scores": {
-                "forme":      round(float(row['score_forme'])      * 100),
-                "duo":        round(float(row['score_duo'])        * 100),
-                "historique": round(float(row['score_historique']) * 100),
-                "gains":      round(float(row['score_gains'])      * 100),
-                "adequation": round(float(row['score_adequation']) * 100),
-                "cote":       round(float(row['score_cote'])       * 100),
+                "forme":      int(round(float(row['score_forme'])      * 100)) if pd.notna(row['score_forme'])      else 0,
+                "duo":        int(round(float(row['score_duo'])        * 100)) if pd.notna(row['score_duo'])        else 0,
+                "historique": int(round(float(row['score_historique']) * 100)) if pd.notna(row['score_historique']) else 0,
+                "gains":      int(round(float(row['score_gains'])      * 100)) if pd.notna(row['score_gains'])      else 0,
+                "adequation": int(round(float(row['score_adequation']) * 100)) if pd.notna(row['score_adequation']) else 0,
+                "cote":       int(round(float(row['score_cote'])       * 100)) if pd.notna(row['score_cote'])       else 0,
             },
         })
 
