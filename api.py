@@ -798,23 +798,18 @@ def notes_pmu():
     # pour le réentraînement futur (V6).
     # ════════════════════════════════════════════════════════════
 
-    # Prédiction V5 (modèle existant, inchangé)
+    # Prédiction V5 (conservé pour debug/comparaison)
     probas_v5 = _model_pmu.predict_proba(df_nc[_features_pmu])[:, 1]
 
-    # Combinaison V6 : moyenne pondérée des 6 scores + signal V5
-    # Chaque score a un poids égal (1/6) — c'est l'objectif architectural.
-    # Le signal V5 sert de garde-fou avec un poids réduit.
+    # V6 : note basée uniquement sur les 6 scores métier équilibrés
     SCORES_V6 = ['score_forme', 'score_duo', 'score_historique',
                  'score_gains', 'score_adequation', 'score_cote']
-    W_SCORES  = 0.70   # 70% scores métier équilibrés
-    W_V5      = 0.30   # 30% modèle V5 existant (garde-fou)
 
     score_metier = df_nc[SCORES_V6].mean(axis=1)  # moyenne équipondérée des 6
-    probas_v6    = W_SCORES * score_metier + W_V5 * pd.Series(probas_v5, index=df_nc.index)
 
-    df_nc['proba_pmu']    = probas_v6
+    df_nc['proba_pmu']    = score_metier
     df_nc['proba_pmu_v5'] = probas_v5          # conservé pour debug/comparaison
-    df_nc['note_pmu']     = _proba_to_note_api(probas_v6)
+    df_nc['note_pmu']     = _proba_to_note_api(score_metier)
 
     # ── Plancher note par cote (inchangé) ─────────────────────
     def _plancher_cote(cote):
