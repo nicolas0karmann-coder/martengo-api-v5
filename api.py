@@ -476,28 +476,6 @@ def _proba_to_note_api(proba_series):
     return pd.Series(proba_series).apply(_convert)
 
 
-def _scores_to_notes_percentile(score_series):
-    """
-    Convertit les scores métier en notes 1-20 par percentile dans la course.
-    - Respecte les vraies différences : deux chevaux proches → notes proches
-    - Pas d'étirement artificiel
-    - Basé sur la distribution réelle des scores dans le peloton
-    """
-    s = pd.Series(score_series).fillna(0.5)
-    n = len(s)
-    if n <= 1:
-        return pd.Series([10] * n, index=s.index)
-
-    # Percentile de chaque cheval dans sa course (0 = dernier, 1 = premier)
-    pct = s.rank(pct=True, method='average')
-
-    # Conversion percentile → note via courbe non-linéaire
-    # Favorise la différenciation en haut (top chevaux bien séparés)
-    # et compresse le bas (les outsiders se ressemblent)
-    notes = (1 + 19 * (pct ** 0.7)).round().astype(int).clip(1, 20)
-
-    return notes
-
 def _scores_to_notes(score_series):
     """
     Convertit les scores métier (0-1) en notes 1-20 par rang relatif dans la course.
@@ -862,7 +840,7 @@ def notes_pmu():
 
     df_nc['proba_pmu']    = score_metier
     df_nc['proba_pmu_v5'] = probas_v5
-    df_nc['note_pmu']     = _scores_to_notes_percentile(score_metier)
+    df_nc['note_pmu']     = _proba_to_note_api(score_metier)
 
     # ── Plancher note par cote (inchangé) ─────────────────────
     def _plancher_cote(cote):
