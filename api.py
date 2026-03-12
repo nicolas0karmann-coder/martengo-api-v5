@@ -476,6 +476,28 @@ def _proba_to_note_api(proba_series):
     return pd.Series(proba_series).apply(_convert)
 
 
+def _scores_to_notes_percentile(score_series):
+    """
+    Convertit les scores métier en notes 1-20 par percentile dans la course.
+    - Respecte les vraies différences : deux chevaux proches → notes proches
+    - Pas d'étirement artificiel
+    - Basé sur la distribution réelle des scores dans le peloton
+    """
+    s = pd.Series(score_series).fillna(0.5)
+    n = len(s)
+    if n <= 1:
+        return pd.Series([10] * n, index=s.index)
+
+    # Percentile de chaque cheval dans sa course (0 = dernier, 1 = premier)
+    pct = s.rank(pct=True, method='average')
+
+    # Conversion percentile → note via courbe non-linéaire
+    # Favorise la différenciation en haut (top chevaux bien séparés)
+    # et compresse le bas (les outsiders se ressemblent)
+    notes = (1 + 19 * (pct ** 0.7)).round().astype(int).clip(1, 20)
+
+    return notes
+
 def _scores_to_notes(score_series):
     """
     Convertit les scores métier (0-1) en notes 1-20 par rang relatif dans la course.
@@ -748,12 +770,18 @@ def notes_pmu():
     s_derniere  = _norm_mix(15 - df_nc['mus_derniere_place'], 0, 14)
     s_podiums   = _norm_mix(df_nc['mus_nb_podiums'],     0, 5)
     s_disq      = 1 - _norm(df_nc['mus_taux_disq'], 0, 0.3)
+    s_temps_mus = _norm_mix(df_nc['hist_moy_temps'].fillna(df_nc['hist_moy_temps'].median()).fillna(100), 60, 100)
+    s_age       = 1 - _norm(df_nc['age'].fillna(5), 3, 12)        # jeune = meilleur potentiel
+    s_deferre   = df_nc['deferre'].fillna(0).astype(float)        # déferré = signal positif
 
     df_nc['score_forme'] = (
-        s_score_p  * 0.40 +
-        s_derniere * 0.30 +
-        s_podiums  * 0.20 +
-        s_disq     * 0.10
+        s_score_p   * 0.30 +
+        s_derniere  * 0.25 +
+        s_podiums   * 0.15 +
+        s_disq      * 0.10 +
+        s_temps_mus * 0.10 +
+        s_age       * 0.05 +
+        s_deferre   * 0.05
     ).clip(0, 1)
 
     # ── Score 2 : Duo cheval/driver ───────────────────────────
@@ -771,28 +799,36 @@ def notes_pmu():
     hist_taux   = df_nc['hist_taux_top3'].fillna(_fallback)
     hist_class  = df_nc['hist_moy_classement'].fillna(8)
     hist_fiable = _norm(df_nc['hist_nb'], 0, 20)
+    hist_tend   = df_nc['hist_tendance'].fillna(0)
+    hist_cote   = df_nc['hist_moy_cote'].fillna(df_nc['hist_moy_cote'].median()).fillna(15)
 
-    s_taux_top3 = _norm_mix(hist_taux,        0, 0.7)
-    s_classement= _norm_mix(10 - hist_class, -5, 9)
-    s_h_fiable  = hist_fiable
+    s_taux_top3  = _norm_mix(hist_taux,        0, 0.7)
+    s_classement = _norm_mix(10 - hist_class, -5, 9)
+    s_h_fiable   = hist_fiable
+    s_tendance   = _norm_mix(hist_tend, -3, 3)                    # tendance positive = en forme
+    s_hist_cote  = 1 - _norm(hist_cote, 2, 30)                   # cote historique basse = bon cheval
 
     df_nc['score_historique'] = (
-        s_taux_top3  * 0.50 +
-        s_classement * 0.35 +
-        s_h_fiable   * 0.15
+        s_taux_top3  * 0.35 +
+        s_classement * 0.25 +
+        s_h_fiable   * 0.10 +
+        s_tendance   * 0.20 +
+        s_hist_cote  * 0.10
     ).clip(0, 1)
 
     # ── Score 4 : Gains / Palmarès carrière ───────────────────
-    s_ratio_vic  = _norm_mix(df_nc['ratio_victoires'],  0, 0.4)
-    s_gains_c    = _norm_mix(df_nc['gains_par_course'], 0, 8000)
-    s_gains_ann  = _norm_mix(df_nc['gains_annee'],      0, 150000)
-    s_ratio_gains= _norm_mix(df_nc['ratio_gains_rec'],  0, 0.5)
+    s_ratio_vic   = _norm_mix(df_nc['ratio_victoires'],  0, 0.4)
+    s_gains_c     = _norm_mix(df_nc['gains_par_course'], 0, 8000)
+    s_gains_ann   = _norm_mix(df_nc['gains_annee'],      0, 150000)
+    s_ratio_gains = _norm_mix(df_nc['ratio_gains_rec'],  0, 0.5)
+    s_ratio_pl    = _norm_mix(df_nc['ratio_places'],     0, 0.6)  # régularité dans le peloton
 
     df_nc['score_gains'] = (
-        s_ratio_vic   * 0.35 +
-        s_gains_c     * 0.30 +
+        s_ratio_vic   * 0.30 +
+        s_gains_c     * 0.25 +
         s_gains_ann   * 0.20 +
-        s_ratio_gains * 0.15
+        s_ratio_gains * 0.15 +
+        s_ratio_pl    * 0.10
     ).clip(0, 1)
 
     # ── Score 5 : Spécialisation / Adéquation course ─────────
@@ -809,18 +845,19 @@ def notes_pmu():
     ).clip(0, 1)
 
     # ── Score 6 : Cote & marché ───────────────────────────────
-    # Signal du marché PMU — présent mais non dominant
-    s_cote_rang  = 1 - df_nc['rang_cote_norme']               # rang inversé : favori = 1
-    s_ecart      = _norm(-df_nc['ecart_cotes'].abs(), -10, 0) # petite déviation live/ref = bon signe
-    _med_temps   = df_nc['temps_norme'].median()
-    _med_temps   = _med_temps if pd.notna(_med_temps) else 0.0
-    s_temps      = _norm(1 / (1 + df_nc['temps_norme'].fillna(_med_temps)), 0, 1)
+    s_cote_rang   = 1 - df_nc['rang_cote_norme']                        # rang inversé : favori = 1
+    s_ecart       = _norm(-df_nc['ecart_cotes'].abs(), -10, 0)          # petite déviation live/ref = bon signe
+    _med_temps    = df_nc['temps_norme'].median()
+    _med_temps    = _med_temps if pd.notna(_med_temps) else 0.0
+    s_temps       = _norm(1 / (1 + df_nc['temps_norme'].fillna(_med_temps)), 0, 1)
+    s_cote_direct = 1 - _norm_mix(df_nc['rapport_direct'].fillna(df_nc['rapport_ref']), 2, 50)  # cote live basse = favori
 
     df_nc['score_cote'] = (
-        s_cote_rang * 0.60 +
-        s_ecart     * 0.25 +
-        s_temps     * 0.15
-    ).clip(0, 1).fillna(s_cote_rang.clip(0, 1))  # fallback sur rang seul si NaN
+        s_cote_rang   * 0.40 +
+        s_cote_direct * 0.30 +
+        s_ecart       * 0.15 +
+        s_temps       * 0.15
+    ).clip(0, 1).fillna(s_cote_rang.clip(0, 1))
 
     # ════════════════════════════════════════════════════════════
     # ÉTAPE 2 — XGBOOST sur les 6 scores équilibrés
@@ -840,7 +877,7 @@ def notes_pmu():
 
     df_nc['proba_pmu']    = score_metier
     df_nc['proba_pmu_v5'] = probas_v5
-    df_nc['note_pmu']     = _proba_to_note_api(score_metier)
+    df_nc['note_pmu']     = _scores_to_notes_percentile(score_metier)
 
     # ── Plancher note par cote (inchangé) ─────────────────────
     def _plancher_cote(cote):
@@ -901,6 +938,18 @@ def download_historique():
         )
     else:
         return jsonify({"error": "Fichier non trouvé"}), 404
+
+# ============================================================
+# DEBUG — liste des features V5
+# ============================================================
+@app.route('/features', methods=['GET'])
+def get_features():
+    if _features_pmu is None:
+        return jsonify({"error": "Modèle non chargé"}), 503
+    return jsonify({
+        "nb_features": len(_features_pmu),
+        "features": list(_features_pmu)
+    })
 
 # ============================================================
 # DÉMARRAGE
