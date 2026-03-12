@@ -830,7 +830,7 @@ def notes_pmu():
     # V6 : note basée uniquement sur les 6 scores métier équilibrés
     SCORES_V6 = ['score_forme', 'score_duo', 'score_historique',
                  'score_gains', 'score_adequation', 'score_cote']
-    POIDS_V6  = [0.30, 0.25, 0.20, 0.12, 0.03, 0.10]
+    POIDS_V6  = [0.21, 0.17, 0.14, 0.08, 0.26, 0.11]
 
     score_metier = sum(df_nc[s] * p for s, p in zip(SCORES_V6, POIDS_V6))
 
