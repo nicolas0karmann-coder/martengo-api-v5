@@ -456,10 +456,10 @@ def _cond_vides():
 
 # Seuils par défaut si bundle ne les contient pas
 _SEUILS_DEFAUT = [
-    (0.001, 1), (0.003, 2), (0.006, 3), (0.010, 4), (0.017, 5),
-    (0.030, 6), (0.060, 7), (0.120, 8), (0.220, 9), (0.350, 10),
-    (0.480, 11), (0.580, 12), (0.680, 13), (0.770, 14), (0.850, 15),
-    (0.910, 16), (0.955, 17), (0.985, 18), (0.997, 19), (1.001, 20),
+    (0.05, 1), (0.10, 2), (0.15, 3), (0.20, 4), (0.25, 5),
+    (0.30, 6), (0.35, 7), (0.40, 8), (0.45, 9), (0.50, 10),
+    (0.55, 11), (0.60, 12), (0.65, 13), (0.70, 14), (0.75, 15),
+    (0.80, 16), (0.85, 17), (0.90, 18), (0.95, 19), (1.01, 20),
 ]
 
 def _proba_to_note_api(proba_series):
@@ -474,6 +474,51 @@ def _proba_to_note_api(proba_series):
                 return note
         return 20
     return pd.Series(proba_series).apply(_convert)
+
+
+def _scores_to_notes_percentile(score_series):
+    """
+    Convertit les scores métier en notes 1-20 par percentile dans la course.
+    - Respecte les vraies différences : deux chevaux proches → notes proches
+    - Pas d'étirement artificiel
+    - Basé sur la distribution réelle des scores dans le peloton
+    """
+    s = pd.Series(score_series).fillna(0.5)
+    n = len(s)
+    if n <= 1:
+        return pd.Series([10] * n, index=s.index)
+
+    # Percentile de chaque cheval dans sa course (0 = dernier, 1 = premier)
+    pct = s.rank(pct=True, method='average')
+
+    # Conversion percentile → note via courbe non-linéaire
+    # Favorise la différenciation en haut (top chevaux bien séparés)
+    # et compresse le bas (les outsiders se ressemblent)
+    notes = (1 + 19 * (pct ** 0.7)).round().astype(int).clip(1, 20)
+
+    return notes
+
+def _scores_to_notes(score_series):
+    """
+    Convertit les scores métier (0-1) en notes 1-20 par rang relatif dans la course.
+    Garantit une bonne différenciation même quand les scores sont proches.
+    Le meilleur cheval obtient toujours une note élevée, le moins bon une note basse.
+    """
+    s = pd.Series(score_series)
+    n = len(s)
+    if n == 0:
+        return s
+
+    # Rang : 1 = meilleur score
+    rangs = s.rank(ascending=False, method='min')
+
+    # Étirement linéaire : rang 1 → note max, rang n → note min
+    # Note max dépend du nombre de partants (plus il y a de chevaux, plus le favori se démarque)
+    note_max = min(20, 12 + max(0, n - 6))   # 6 chevaux → 18, 16 chevaux → 20
+    note_min = max(1,  note_max - n - 2)      # écart suffisant entre premier et dernier
+
+    notes = note_max - (rangs - 1) * (note_max - note_min) / (n - 1 + 1e-9)
+    return notes.round().astype(int).clip(1, 20)
 
 
 @app.route('/notes_pmu', methods=['GET'])
@@ -703,16 +748,28 @@ def notes_pmu():
     # ════════════════════════════════════════════════════════════
 
     def _norm(series, low, high):
-        """Clip + normalise linéairement entre 0 et 1."""
+        """Clip + normalise linéairement entre 0 et 1 (bornes absolues)."""
         return ((series.clip(low, high) - low) / (high - low + 1e-9)).clip(0, 1)
 
+    def _norm_rel(series):
+        """Normalise relativement au peloton : min→0, max→1.
+        Si tous les chevaux sont identiques, retourne 0.5 pour tous."""
+        mn, mx = series.min(), series.max()
+        if mx - mn < 1e-9:
+            return pd.Series(0.5, index=series.index)
+        return ((series - mn) / (mx - mn)).clip(0, 1)
+
+    def _norm_mix(series, low, high, rel_weight=0.5):
+        """Mix normalisation absolue + relative au peloton."""
+        abs_norm = _norm(series, low, high)
+        rel_norm = _norm_rel(series)
+        return (abs_norm * (1 - rel_weight) + rel_norm * rel_weight).clip(0, 1)
+
     # ── Score 1 : Forme / Musique ─────────────────────────────
-    # Basé sur score_pondere (trajectoire), derniere_place,
-    # taux de podiums, pénalité disqualification
-    s_score_p   = _norm(df_nc['mus_score_pondere'],  0, 9)      # 0=mauvais, 9=excellent
-    s_derniere  = _norm(15 - df_nc['mus_derniere_place'], 0, 14) # inversion : 1er = max
-    s_podiums   = _norm(df_nc['mus_nb_podiums'],     0, 5)       # jusqu'à 5 podiums sur 10
-    s_disq      = 1 - _norm(df_nc['mus_taux_disq'], 0, 0.3)     # pénalité disqualification
+    s_score_p   = _norm_mix(df_nc['mus_score_pondere'],  0, 9)
+    s_derniere  = _norm_mix(15 - df_nc['mus_derniere_place'], 0, 14)
+    s_podiums   = _norm_mix(df_nc['mus_nb_podiums'],     0, 5)
+    s_disq      = 1 - _norm(df_nc['mus_taux_disq'], 0, 0.3)
 
     df_nc['score_forme'] = (
         s_score_p  * 0.40 +
@@ -722,10 +779,9 @@ def notes_pmu():
     ).clip(0, 1)
 
     # ── Score 2 : Duo cheval/driver ───────────────────────────
-    # win_rate bayésien pondéré par la fiabilité (nb courses ensemble)
-    s_winrate = _norm(df_nc['duo_win_rate_bayes'], _fallback * 0.8, 0.65)
-    s_fiable  = df_nc['duo_fiable'].astype(float)                 # 0 ou 1
-    s_duo_n   = _norm(df_nc['duo_n'], 1, 15)                      # expérience duo
+    s_winrate = _norm_mix(df_nc['duo_win_rate_bayes'], _fallback * 0.8, 0.65)
+    s_fiable  = df_nc['duo_fiable'].astype(float)
+    s_duo_n   = _norm_mix(df_nc['duo_n'], 1, 15)
 
     df_nc['score_duo'] = (
         s_winrate * 0.60 +
@@ -734,13 +790,12 @@ def notes_pmu():
     ).clip(0, 1)
 
     # ── Score 3 : Historique cheval ───────────────────────────
-    # Palmarès global sur toute la carrière dans la base
     hist_taux   = df_nc['hist_taux_top3'].fillna(_fallback)
     hist_class  = df_nc['hist_moy_classement'].fillna(8)
-    hist_fiable = _norm(df_nc['hist_nb'], 0, 20)                  # confiance selon nb courses
+    hist_fiable = _norm(df_nc['hist_nb'], 0, 20)
 
-    s_taux_top3 = _norm(hist_taux,          0, 0.7)
-    s_classement= _norm(10 - hist_class,   -5, 9)                 # inversion classement
+    s_taux_top3 = _norm_mix(hist_taux,        0, 0.7)
+    s_classement= _norm_mix(10 - hist_class, -5, 9)
     s_h_fiable  = hist_fiable
 
     df_nc['score_historique'] = (
@@ -750,11 +805,10 @@ def notes_pmu():
     ).clip(0, 1)
 
     # ── Score 4 : Gains / Palmarès carrière ───────────────────
-    # Reflet de la qualité globale du cheval sur le long terme
-    s_ratio_vic  = _norm(df_nc['ratio_victoires'],  0, 0.4)
-    s_gains_c    = _norm(df_nc['gains_par_course'], 0, 8000)
-    s_gains_ann  = _norm(df_nc['gains_annee'],      0, 150000)
-    s_ratio_gains= _norm(df_nc['ratio_gains_rec'],  0, 0.5)
+    s_ratio_vic  = _norm_mix(df_nc['ratio_victoires'],  0, 0.4)
+    s_gains_c    = _norm_mix(df_nc['gains_par_course'], 0, 8000)
+    s_gains_ann  = _norm_mix(df_nc['gains_annee'],      0, 150000)
+    s_ratio_gains= _norm_mix(df_nc['ratio_gains_rec'],  0, 0.5)
 
     df_nc['score_gains'] = (
         s_ratio_vic   * 0.35 +
@@ -764,11 +818,10 @@ def notes_pmu():
     ).clip(0, 1)
 
     # ── Score 5 : Spécialisation / Adéquation course ─────────
-    # Est-ce que ce cheval est fait pour CETTE course ?
-    s_spec_dist  = _norm(df_nc['spec_dist_rate'],  _fallback * 0.8, 0.65)
-    s_spec_disc  = _norm(df_nc['spec_disc_rate'],  _fallback * 0.8, 0.65)
-    s_entr       = _norm(df_nc['entr_win_rate_bayes'], _fallback * 0.8, 0.55)
-    s_avis       = _norm(df_nc['avis_entraineur'].astype(float), -1, 1)  # -1=négatif, 1=positif
+    s_spec_dist  = _norm_mix(df_nc['spec_dist_rate'],       _fallback * 0.8, 0.65)
+    s_spec_disc  = _norm_mix(df_nc['spec_disc_rate'],       _fallback * 0.8, 0.65)
+    s_entr       = _norm_mix(df_nc['entr_win_rate_bayes'],  _fallback * 0.8, 0.55)
+    s_avis       = _norm(df_nc['avis_entraineur'].astype(float), -1, 1)
 
     df_nc['score_adequation'] = (
         s_spec_dist * 0.35 +
@@ -808,8 +861,8 @@ def notes_pmu():
     score_metier = df_nc[SCORES_V6].mean(axis=1)  # moyenne équipondérée des 6
 
     df_nc['proba_pmu']    = score_metier
-    df_nc['proba_pmu_v5'] = probas_v5          # conservé pour debug/comparaison
-    df_nc['note_pmu']     = _proba_to_note_api(score_metier)
+    df_nc['proba_pmu_v5'] = probas_v5
+    df_nc['note_pmu']     = _scores_to_notes_percentile(score_metier)
 
     # ── Plancher note par cote (inchangé) ─────────────────────
     def _plancher_cote(cote):
