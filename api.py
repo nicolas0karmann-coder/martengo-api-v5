@@ -881,18 +881,6 @@ def notes_pmu():
     df_nc['proba_pmu_v5'] = probas_v5
     df_nc['note_pmu']     = _proba_to_note_api(score_metier)
 
-    # ── Plancher note par cote (inchangé) ─────────────────────
-    def _plancher_cote(cote):
-        if cote is None: return 1
-        if cote < 3:     return 12
-        elif cote < 5:   return 10
-        elif cote < 8:   return 8
-        elif cote < 15:  return 6
-        elif cote < 25:  return 4
-        else:            return 1
-
-    df_nc['plancher'] = df_nc['_cote_app'].apply(_plancher_cote)
-    df_nc['note_pmu'] = df_nc[['note_pmu', 'plancher']].max(axis=1)
 
     # ── Résultat JSON (scores détaillés inclus) ───────────────
     result = []
@@ -914,6 +902,7 @@ def notes_pmu():
                 "adequation": int(round(float(row['score_adequation']) * 100)) if pd.notna(row['score_adequation']) else 0,
                 "cote":       int(round(float(row['score_cote'])       * 100)) if pd.notna(row['score_cote'])       else 0,
             },
+            "taux_disq": round(float(row['mus_taux_disq']) * 100, 1) if pd.notna(row.get('mus_taux_disq')) else 0,
         })
 
     return jsonify({
