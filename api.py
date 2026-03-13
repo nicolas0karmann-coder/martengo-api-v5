@@ -261,6 +261,33 @@ CORDE_MAP        = {'CORDE_A_GAUCHE': 0, 'CORDE_A_DROITE': 1}
 SEXE_MAP         = {'MALES': 0, 'FEMELLES': 1, 'MIXTE': 2}
 
 
+def _calculer_hist_snapshot():
+    """Calcule les stats historiques par cheval depuis historique_notes.csv."""
+    global _hist_snapshot
+    hist = pd.read_csv(HISTORIQUE_PATH)
+    hist['date'] = pd.to_datetime(hist['date'])
+
+    def _stats_cheval(g):
+        g = g.dropna(subset=['rang_arrivee']).sort_values('date')
+        nb = len(g)
+        if nb == 0:
+            return pd.Series({'hist_nb': 0, 'hist_taux_top3': np.nan,
+                              'hist_moy_classement': np.nan, 'hist_tendance': np.nan,
+                              'hist_moy_cote': np.nan})
+        top3     = (g['rang_arrivee'] <= 3).mean()
+        moy_cl   = g['rang_arrivee'].mean()
+        moy_cote = g['rapport'].mean() if 'rapport' in g.columns else np.nan
+        rec      = g.tail(3)['rang_arrivee'].mean()
+        anc      = g.head(3)['rang_arrivee'].mean() if nb >= 6 else moy_cl
+        tendance = round(float(anc - rec), 2)
+        return pd.Series({'hist_nb': nb, 'hist_taux_top3': round(top3, 3),
+                          'hist_moy_classement': round(moy_cl, 2),
+                          'hist_tendance': tendance, 'hist_moy_cote': round(moy_cote, 2)})
+
+    _hist_snapshot = hist.groupby('nom').apply(_stats_cheval).reset_index()
+    print(f"✅ hist_snapshot calculé depuis historique : {len(_hist_snapshot)} chevaux")
+
+
 def _charger_modele_pmu():
     global _model_pmu, _features_pmu, _le_driver, _le_entr
     global _driver_stats, _entr_stats, _duo_stats, _spec_dist, _spec_disc
@@ -294,6 +321,14 @@ def _charger_modele_pmu():
         v = pmu.get('version', 1)
         nb_duos = len(_duo_stats) if _duo_stats is not None else 0
         print(f"✅ Modèle PMU v{v} chargé ({len(_features_pmu)} features, {nb_duos} duos)")
+
+        # ── Calcul hist_snapshot depuis historique si absent du pkl ──
+        if _hist_snapshot is None and os.path.exists(HISTORIQUE_PATH):
+            try:
+                _calculer_hist_snapshot()
+            except Exception as e:
+                print(f"⚠️  hist_snapshot non calculé : {e}")
+
         return True
     except Exception as e:
         print(f"❌ Erreur chargement model_pmu.pkl : {e}")
