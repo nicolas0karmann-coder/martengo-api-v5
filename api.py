@@ -264,28 +264,35 @@ SEXE_MAP         = {'MALES': 0, 'FEMELLES': 1, 'MIXTE': 2}
 def _calculer_hist_snapshot():
     """Calcule les stats historiques par cheval depuis historique_notes.csv."""
     global _hist_snapshot
-    hist = pd.read_csv(HISTORIQUE_PATH)
+    hist = pd.read_csv(HISTORIQUE_PATH, usecols=['date','nom','rang_arrivee','rapport'])
     hist['date'] = pd.to_datetime(hist['date'])
+    hist = hist.dropna(subset=['rang_arrivee']).sort_values(['nom','date'])
 
-    def _stats_cheval(g):
-        g = g.dropna(subset=['rang_arrivee']).sort_values('date')
-        nb = len(g)
-        if nb == 0:
-            return pd.Series({'hist_nb': 0, 'hist_taux_top3': np.nan,
-                              'hist_moy_classement': np.nan, 'hist_tendance': np.nan,
-                              'hist_moy_cote': np.nan})
-        top3     = (g['rang_arrivee'] <= 3).mean()
-        moy_cl   = g['rang_arrivee'].mean()
-        moy_cote = g['rapport'].mean() if 'rapport' in g.columns else np.nan
-        rec      = g.tail(3)['rang_arrivee'].mean()
-        anc      = g.head(3)['rang_arrivee'].mean() if nb >= 6 else moy_cl
-        tendance = round(float(anc - rec), 2)
-        return pd.Series({'hist_nb': nb, 'hist_taux_top3': round(top3, 3),
-                          'hist_moy_classement': round(moy_cl, 2),
-                          'hist_tendance': tendance, 'hist_moy_cote': round(moy_cote, 2)})
+    # Calcul vectorisé
+    g = hist.groupby('nom')
+    nb       = g['rang_arrivee'].count()
+    taux_top3= (hist['rang_arrivee'] <= 3).groupby(hist['nom']).mean()
+    moy_cl   = g['rang_arrivee'].mean().round(2)
+    moy_cote = g['rapport'].mean().round(2)
 
-    _hist_snapshot = hist.groupby('nom').apply(_stats_cheval).reset_index()
-    print(f"✅ hist_snapshot calculé depuis historique : {len(_hist_snapshot)} chevaux")
+    # Tendance : moy 3 dernières - moy 3 premières (vectorisé)
+    def _tendance(x):
+        n = len(x)
+        rec = x.iloc[-3:].mean()
+        anc = x.iloc[:3].mean() if n >= 6 else x.mean()
+        return round(float(anc - rec), 2)
+
+    tendance = g['rang_arrivee'].apply(_tendance)
+
+    _hist_snapshot = pd.DataFrame({
+        'nom':                nb.index,
+        'hist_nb':            nb.values,
+        'hist_taux_top3':     taux_top3.values.round(3),
+        'hist_moy_classement':moy_cl.values,
+        'hist_tendance':      tendance.values,
+        'hist_moy_cote':      moy_cote.values,
+    })
+    print(f"✅ hist_snapshot calculé : {len(_hist_snapshot)} chevaux")
 
 
 def _charger_modele_pmu():
@@ -721,10 +728,10 @@ def notes_pmu():
     df_nc['spec_disc_rate'] = df_nc['spec_disc_rate'].fillna(_fallback)
 
     if _hist_snapshot is not None:
-        df_nc = df_nc.merge(
-            _hist_snapshot[['nom', 'hist_nb', 'hist_moy_classement', 'hist_nb_top3',
-                            'hist_taux_top3', 'hist_moy_temps', 'hist_tendance', 'hist_moy_cote']],
-            on='nom', how='left')
+        hist_cols_dispo = [c for c in ['nom', 'hist_nb', 'hist_moy_classement', 'hist_nb_top3',
+                            'hist_taux_top3', 'hist_moy_temps', 'hist_tendance', 'hist_moy_cote']
+                           if c in _hist_snapshot.columns]
+        df_nc = df_nc.merge(_hist_snapshot[hist_cols_dispo], on='nom', how='left')
     for col in ['hist_nb', 'hist_nb_top3']:
         if col not in df_nc.columns:
             df_nc[col] = 0
