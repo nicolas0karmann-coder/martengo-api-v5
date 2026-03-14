@@ -9,6 +9,7 @@ from io import StringIO
 import os
 import re
 import pickle
+import threading
 import requests as http_requests
 from sklearn.ensemble import HistGradientBoostingClassifier
 
@@ -18,10 +19,95 @@ CORS(app)
 # ============================================================
 # DONNÉES HISTORIQUES
 # ============================================================
-# historique_notes.csv : généré depuis dataset_pmu_v4 + ordre_arrivees
-# colonnes : date, r_num, c_num, numero, nom, note, rapport, rang_arrivee
+# historique_notes.csv : versionné dans le repo (117k lignes, source de vérité)
+# historique_courses.csv : courses ajoutées via /ajouter
+#
+# PERSISTANCE :
+#   - Si DATABASE_URL est défini (PostgreSQL sur Render/Railway) → stockage SQL
+#   - Sinon → fallback CSV local (éphémère sur Render Free, acceptable en dev)
+#
+# Pour activer Postgres : ajoutez DATABASE_URL dans les variables d'env Render.
+# La table est créée automatiquement au démarrage.
+# ============================================================
 HISTORIQUE_PATH = "historique_notes.csv"
-CSV_PATH        = "historique_courses.csv"  # courses ajoutées manuellement via /ajouter
+CSV_PATH        = "historique_courses.csv"
+
+# ── Connexion PostgreSQL optionnelle ──────────────────────────
+_pg_conn = None
+
+def _get_pg():
+    """Retourne une connexion PostgreSQL si DATABASE_URL est défini, sinon None."""
+    global _pg_conn
+    if _pg_conn is not None:
+        try:
+            _pg_conn.cursor().execute("SELECT 1")
+            return _pg_conn
+        except Exception:
+            _pg_conn = None
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return None
+    try:
+        import psycopg2
+        # Render fournit parfois "postgres://" → psycopg2 veut "postgresql://"
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
+        _pg_conn = psycopg2.connect(db_url, sslmode="require")
+        _pg_conn.autocommit = True
+        # Créer la table si elle n'existe pas
+        with _pg_conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS courses_manuelles (
+                    id SERIAL PRIMARY KEY,
+                    date DATE NOT NULL,
+                    numero INTEGER NOT NULL,
+                    note FLOAT,
+                    rapport FLOAT,
+                    rang_arrivee INTEGER,
+                    score_cible INTEGER DEFAULT 0
+                )
+            """)
+        print("✅ PostgreSQL connecté et table prête")
+        return _pg_conn
+    except Exception as e:
+        print(f"⚠️  PostgreSQL indisponible ({e}) — fallback CSV")
+        return None
+
+
+def _lire_courses_manuelles():
+    """Lit les courses ajoutées manuellement (PG ou CSV)."""
+    conn = _get_pg()
+    if conn:
+        try:
+            return pd.read_sql("SELECT date, numero, note, rapport, rang_arrivee, score_cible FROM courses_manuelles", conn)
+        except Exception as e:
+            print(f"⚠️  Lecture PG échouée ({e}) — fallback CSV")
+    if os.path.exists(CSV_PATH):
+        return pd.read_csv(CSV_PATH)
+    return pd.DataFrame(columns=['date','numero','note','rapport','rang_arrivee','score_cible'])
+
+
+def _ecrire_courses_manuelles(df_new_rows):
+    """Persiste de nouvelles lignes (PG prioritaire, sinon CSV)."""
+    conn = _get_pg()
+    if conn:
+        try:
+            from psycopg2.extras import execute_values
+            with conn.cursor() as cur:
+                execute_values(cur,
+                    "INSERT INTO courses_manuelles (date, numero, note, rapport, rang_arrivee, score_cible) VALUES %s",
+                    [(row['date'], int(row['numero']), float(row['note']),
+                      float(row['rapport']), int(row['rang_arrivee']), int(row.get('score_cible', 0)))
+                     for _, row in df_new_rows.iterrows()]
+                )
+            print(f"✅ {len(df_new_rows)} lignes écrites en PostgreSQL")
+            return
+        except Exception as e:
+            print(f"⚠️  Écriture PG échouée ({e}) — fallback CSV")
+    # Fallback CSV (éphémère sur Render Free)
+    df_all = _lire_courses_manuelles()
+    df_all = pd.concat([df_all, df_new_rows], ignore_index=True).drop_duplicates()
+    df_all.to_csv(CSV_PATH, index=False)
+    print(f"⚠️  Données écrites dans {CSV_PATH} (éphémère — seront perdues au redémarrage)")
 
 
 FEATURES = [
@@ -75,15 +161,14 @@ def initialiser():
         print("⚠️  Aucun fichier historique trouvé — données vides")
         df = pd.DataFrame(columns=['date','r_num','c_num','numero','nom','note','rapport','rang_arrivee'])
 
-    # Fusionner avec courses ajoutées manuellement
-    if os.path.exists(CSV_PATH):
-        df_manual = pd.read_csv(CSV_PATH)
-        if len(df_manual) > 0:
-            # Garder seulement les colonnes communes
-            common_cols = ['date', 'numero', 'note', 'rapport', 'rang_arrivee']
-            df_manual = df_manual[[c for c in common_cols if c in df_manual.columns]]
-            df_base   = df[[c for c in common_cols if c in df.columns]]
-            df = pd.concat([df_base, df_manual], ignore_index=True).drop_duplicates()
+    # Fusionner avec courses ajoutées manuellement (PG ou CSV)
+    df_manual = _lire_courses_manuelles()
+    if len(df_manual) > 0:
+        common_cols = ['date', 'numero', 'note', 'rapport', 'rang_arrivee']
+        df_manual = df_manual[[c for c in common_cols if c in df_manual.columns]]
+        df_base   = df[[c for c in common_cols if c in df.columns]]
+        df = pd.concat([df_base, df_manual], ignore_index=True).drop_duplicates()
+        print(f"✅ {len(df_manual)} lignes manuelles fusionnées")
 
     df['date'] = pd.to_datetime(df['date'])
     # Assurer colonne score_cible pour compatibilité
@@ -187,8 +272,12 @@ def ajouter():
       "date": "2026-03-01",
       "chevaux": [{"numero":1,"note":15,"rapport":12.5,"rang_arrivee":2}, ...]
     }
+
+    Le réentraînement des modèles est lancé en tâche de fond (thread) pour
+    ne pas bloquer la réponse HTTP — sur 117k lignes, l'entraînement prend
+    plusieurs secondes et bloquerait le client sinon.
     """
-    global df, model, note_mean, note_std, modele_abs, note_mean_a, note_std_a
+    global df
 
     data    = request.get_json()
     date    = data.get('date')
@@ -197,6 +286,7 @@ def ajouter():
     if not date or not chevaux:
         return jsonify({"error": "date et chevaux requis"}), 400
 
+    # ── 1. Construire les nouvelles lignes ──
     rows = []
     for c in chevaux:
         rows.append({
@@ -207,25 +297,45 @@ def ajouter():
             "rang_arrivee": c['rang_arrivee'],
             "score_cible":  0,
         })
+    df_new = pd.DataFrame(rows)
 
-    df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
-    df.to_csv(CSV_PATH, index=False)
+    # ── 2. Persister immédiatement (PG ou CSV) ──
+    _ecrire_courses_manuelles(df_new)
 
-    # Réentraînement
-    df_p = df.copy()
-    df_p['target'] = ((df_p['rapport'] >= 10) & (df_p['rang_arrivee'] <= 3)).astype(int)
-    df_p, note_mean, note_std = _enrichir(df_p)
-    model = _entrainer(df_p, FEATURES, 'target')
+    # ── 3. Mettre à jour le DataFrame en mémoire ──
+    df = pd.concat([df, df_new], ignore_index=True)
 
-    df_a = df.copy()
-    df_a['target_absolu'] = (df_a['rang_arrivee'] <= 3).astype(int)
-    df_a, note_mean_a, note_std_a = _enrichir(df_a)
-    modele_abs = _entrainer(df_a, FEATURES_ABSOLU, 'target_absolu')
+    # ── 4. Réentraînement asynchrone ──
+    # On répond tout de suite au client, le réentraînement tourne en arrière-plan.
+    # Les modèles restent utilisables avec les anciennes valeurs pendant ce temps.
+    def _reentrainer_bg():
+        global model, note_mean, note_std, modele_abs, note_mean_a, note_std_a
+        try:
+            print(f"🔄 Réentraînement en arrière-plan sur {len(df)} lignes…")
+            df_p = df.copy()
+            df_p['target'] = ((df_p['rapport'] >= 10) & (df_p['rang_arrivee'] <= 3)).astype(int)
+            df_p, nm, ns = _enrichir(df_p)
+            m = _entrainer(df_p, FEATURES, 'target')
+
+            df_a = df.copy()
+            df_a['target_absolu'] = (df_a['rang_arrivee'] <= 3).astype(int)
+            df_a, nma, nsa = _enrichir(df_a)
+            ma = _entrainer(df_a, FEATURES_ABSOLU, 'target_absolu')
+
+            # Mise à jour atomique des globals
+            model, note_mean, note_std = m, nm, ns
+            modele_abs, note_mean_a, note_std_a = ma, nma, nsa
+            print(f"✅ Réentraînement terminé ({len(df)} lignes / {df['date'].nunique()} courses)")
+        except Exception as e:
+            print(f"❌ Erreur réentraînement : {e}")
+
+    threading.Thread(target=_reentrainer_bg, daemon=True).start()
 
     return jsonify({
-        "message":  f"Course du {date} ajoutée et modèles réentraînés",
-        "nb_lignes": len(df),
+        "message":   f"Course du {date} ajoutée — réentraînement en cours",
+        "nb_lignes":  len(df),
         "nb_courses": int(df['date'].nunique()),
+        "stockage":   "postgresql" if _get_pg() else "csv_ephemere",
     })
 
 
@@ -860,13 +970,25 @@ def notes_pmu():
     ).clip(0, 1).fillna(s_cote_rang.clip(0, 1))
 
     # ════════════════════════════════════════════════════════════
-    # ÉTAPE 2 — XGBOOST sur les 6 scores équilibrés
-    # Le modèle V5 existant reste utilisé pour compatibilité,
-    # mais on injecte aussi les scores comme features supplémentaires
-    # pour le réentraînement futur (V6).
+    # SCORING FINAL — Architecture V6 (score métier pondéré)
+    #
+    # Le pkl V5 (XGBoost) est conservé en mémoire pour compatibilité
+    # et peut être réactivé ci-dessous, mais la note finale repose
+    # désormais exclusivement sur les 6 scores métier déterministes.
+    #
+    # Pourquoi ce choix :
+    #   - Le XGBoost V5 a été entraîné sur des features brutes (rapport,
+    #     musique, etc.) sans les scores normalisés V6. Il produit des
+    #     probabilités cohérentes mais moins interprétables.
+    #   - Les 6 scores V6 sont normalisés 0-1, équilibrés entre eux,
+    #     et directement exposés au frontend pour l'affichage radar.
+    #   - Une future V7 pourra ré-entraîner le XGBoost sur les scores V6
+    #     comme features d'entrée (stacking).
+    #
+    # Pour revenir au XGBoost : remplacer score_metier par probas_v5
+    # dans les lignes df_nc['proba_pmu'] et df_nc['note_pmu'] ci-dessous.
     # ════════════════════════════════════════════════════════════
 
-    # V6 : note basée uniquement sur les 6 scores métier équilibrés
     SCORES_V6 = ['score_forme', 'score_duo', 'score_historique',
                  'score_gains', 'score_adequation', 'score_cote']
     POIDS_V6  = [0.21, 0.17, 0.14, 0.08, 0.26, 0.11]
@@ -874,12 +996,14 @@ def notes_pmu():
     score_metier = sum(df_nc[s] * p for s, p in zip(SCORES_V6, POIDS_V6))
     df_nc['score_metier'] = score_metier
 
-    # Prédiction via modèle (V5 ou V6 selon le pkl chargé)
-    probas_v5 = _model_pmu.predict_proba(df_nc[_features_pmu])[:, 1]
+    # Note finale basée sur score_metier (V6)
+    # Pour basculer sur XGBoost V5 : décommenter les 2 lignes suivantes
+    # probas_v5 = _model_pmu.predict_proba(df_nc[_features_pmu])[:, 1]
+    # score_final = probas_v5
+    score_final = score_metier
 
-    df_nc['proba_pmu']    = score_metier
-    df_nc['proba_pmu_v5'] = probas_v5
-    df_nc['note_pmu']     = _proba_to_note_api(score_metier)
+    df_nc['proba_pmu'] = score_final
+    df_nc['note_pmu']  = _proba_to_note_api(score_final)
 
 
     # ── Résultat JSON (scores détaillés inclus) ───────────────
@@ -940,6 +1064,34 @@ def get_features():
     return jsonify({
         "nb_features": len(_features_pmu),
         "features": list(_features_pmu)
+    })
+
+# ============================================================
+# DEBUG — infos stockage
+# ============================================================
+@app.route('/storage_info', methods=['GET'])
+def storage_info():
+    """Indique quel backend de stockage est actif pour /ajouter."""
+    conn = _get_pg()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM courses_manuelles")
+                nb = cur.fetchone()[0]
+            return jsonify({"stockage": "postgresql", "nb_lignes_manuelles": nb, "ephemere": False})
+        except Exception as e:
+            return jsonify({"stockage": "postgresql_erreur", "detail": str(e)})
+    nb_csv = 0
+    if os.path.exists(CSV_PATH):
+        try:
+            nb_csv = len(pd.read_csv(CSV_PATH))
+        except Exception:
+            pass
+    return jsonify({
+        "stockage": "csv_local",
+        "ephemere": True,
+        "avertissement": "Les données /ajouter seront perdues au redémarrage. Ajoutez DATABASE_URL pour activer PostgreSQL.",
+        "nb_lignes_csv": nb_csv,
     })
 
 # ============================================================
