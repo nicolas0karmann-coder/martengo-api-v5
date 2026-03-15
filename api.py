@@ -1059,8 +1059,20 @@ def notes_pmu():
                     print(f"⚠️  Feature '{feat}' absente — remplacée par 0.5")
                     df_input[feat] = 0.5
 
-            probas       = _model_v7.predict_proba(df_input[features_modele])[:, 1]
-            score_final  = pd.Series(probas, index=df_nc.index)
+            probas = _model_v7.predict_proba(df_input[features_modele])[:, 1]
+
+            # Combinaison hybride : XGBoost + poids fixe score_cote
+            # Si le pkl définit poids_cote_fixe (modèle V8), on l'applique.
+            # Sinon on utilise les probas brutes (comportement V7 classique).
+            poids_cote = _bundle_v7.get('poids_cote_fixe', 0.0)
+            poids_xgb  = _bundle_v7.get('poids_xgb', 1.0)
+            if poids_cote > 0:
+                score_final = pd.Series(
+                    poids_xgb * probas + poids_cote * df_nc['score_cote'].values,
+                    index=df_nc.index
+                )
+            else:
+                score_final = pd.Series(probas, index=df_nc.index)
 
             # Conversion hybride : rang relatif + écarts réels préservés
             df_nc['note_pmu'] = _proba_to_note_v7(score_final)
