@@ -400,6 +400,12 @@ def _calculer_hist_snapshot():
 
     tendance = g['rang_arrivee'].apply(_tendance)
 
+    # Courses dans les 60 derniers jours
+    date_max  = hist['date'].max()
+    date_60j  = date_max - pd.Timedelta(days=60)
+    hist_rec  = hist[hist['date'] >= date_60j]
+    courses_60j = hist_rec.groupby('nom')['rang_arrivee'].count().rename('courses_60j')
+
     _hist_snapshot = pd.DataFrame({
         'nom':                nb.index,
         'hist_nb':            nb.values,
@@ -407,7 +413,8 @@ def _calculer_hist_snapshot():
         'hist_moy_classement':moy_cl.values,
         'hist_tendance':      tendance.values,
         'hist_moy_cote':      moy_cote.values,
-    })
+    }).join(courses_60j, on='nom').fillna({'courses_60j': 0})
+    _hist_snapshot['courses_60j'] = _hist_snapshot['courses_60j'].astype(int)
     print(f"✅ hist_snapshot calculé : {len(_hist_snapshot)} chevaux")
 
 
@@ -1113,7 +1120,8 @@ def notes_pmu():
                 "adequation": int(round(float(row['score_adequation']) * 100)) if pd.notna(row['score_adequation']) else 0,
                 "cote":       int(round(float(row['score_cote'])       * 100)) if pd.notna(row['score_cote'])       else 0,
             },
-            "taux_disq": round(float(row['mus_taux_disq']) * 100, 1) if pd.notna(row.get('mus_taux_disq')) else 0,
+            "taux_disq":    round(float(row['mus_taux_disq']) * 100, 1) if pd.notna(row.get('mus_taux_disq')) else 0,
+            "courses_60j":  int(row['courses_60j']) if pd.notna(row.get('courses_60j')) else 0,
         })
 
     return jsonify({
