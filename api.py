@@ -900,9 +900,13 @@ def notes_pmu():
 
     if _hist_snapshot is not None:
         hist_cols_dispo = [c for c in ['nom', 'hist_nb', 'hist_moy_classement', 'hist_nb_top3',
-                            'hist_taux_top3', 'hist_moy_temps', 'hist_tendance', 'hist_moy_cote']
+                            'hist_taux_top3', 'hist_moy_temps', 'hist_tendance', 'hist_moy_cote',
+                            'courses_60j']
                            if c in _hist_snapshot.columns]
         df_nc = df_nc.merge(_hist_snapshot[hist_cols_dispo], on='nom', how='left')
+    if 'courses_60j' not in df_nc.columns:
+        df_nc['courses_60j'] = 0
+    df_nc['courses_60j'] = df_nc['courses_60j'].fillna(0).astype(int)
     for col in ['hist_nb', 'hist_nb_top3']:
         if col not in df_nc.columns:
             df_nc[col] = 0
