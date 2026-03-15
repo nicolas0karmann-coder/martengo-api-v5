@@ -363,7 +363,13 @@ _mediane_rapport_ref = 18.0
 _hist_snapshot       = None
 _seuils_notes        = None
 
-PMU_MODEL_PATH = "model_pmu_v5.pkl"
+PMU_MODEL_PATH   = "model_pmu_v5.pkl"
+PMU_V7_PATH      = "model_pmu_v7.pkl"   # XGBoost entraîné sur les 6 scores V6
+
+# Globals V7
+_model_v7        = None   # XGBClassifier entraîné sur scores V6
+_bundle_v7       = {}     # métadonnées du pkl (features, note_conversion…)
+_use_v7          = False  # True dès que le modèle V7 est prêt
 
 DISC_MUSIQUE_MAP = {'a': 0, 'm': 1, 'p': 2, 'h': 3, 's': 4, 'c': 5}
 DISCIPLINE_MAP   = {'TROT_ATTELE': 0, 'TROT_MONTE': 1, 'PLAT': 2, 'OBSTACLE': 3}
@@ -606,7 +612,7 @@ def _cond_vides():
             'corde': 0, 'condition_sexe': 2, 'nb_partants': 0}
 
 
-# Seuils par défaut si bundle ne les contient pas
+# Seuils par défaut si bundle ne les contient pas (utilisé pour V6 fallback)
 _SEUILS_DEFAUT = [
     (0.05, 1), (0.10, 2), (0.15, 3), (0.20, 4), (0.25, 5),
     (0.30, 6), (0.35, 7), (0.40, 8), (0.45, 9), (0.50, 10),
@@ -616,8 +622,7 @@ _SEUILS_DEFAUT = [
 
 def _proba_to_note_api(proba_series):
     """
-    Convertit les probabilités en notes 1-20 via seuils asymétriques.
-    Utilise les seuils du bundle si disponibles, sinon les seuils par défaut.
+    Conversion V6 (fallback) : seuils fixes sur probabilités absolues.
     """
     seuils = _seuils_notes if _seuils_notes is not None else _SEUILS_DEFAUT
     def _convert(p):
@@ -626,6 +631,55 @@ def _proba_to_note_api(proba_series):
                 return note
         return 20
     return pd.Series(proba_series).apply(_convert)
+
+
+def _proba_to_note_v7(proba_series):
+    """
+    Conversion V7 hybride : combine rang relatif + écarts réels.
+
+    Problème de la conversion percentile pure :
+      → notes uniformément espacées (2,4,6...20) peu importe les vrais écarts
+
+    Problème des seuils fixes :
+      → saturation à 20 quand les probas sont hautes pour tout le monde
+
+    Solution hybride (70% rang relatif + 30% proba absolue) :
+      → le meilleur du peloton a toujours la note la plus haute (rang relatif)
+      → les écarts entre les notes reflètent les vrais écarts de probabilité
+      → un cheval à 0.95 et un à 0.90 auront des notes différentes
+      → un cheval clairement meilleur (0.90 vs 0.20) aura un écart net
+    """
+    s = pd.Series(proba_series).reset_index(drop=True)
+    n = len(s)
+
+    if n == 1:
+        return pd.Series([20], index=proba_series.index)
+
+    # Composante 1 : rang relatif (0 = pire, 1 = meilleur)
+    rang = s.rank(pct=True, method='average')
+
+    # Composante 2 : proba absolue normalisée sur le peloton courant
+    # (min du peloton → 0, max du peloton → 1)
+    p_min, p_max = s.min(), s.max()
+    if p_max - p_min < 1e-6:
+        proba_norm = pd.Series(0.5, index=s.index)
+    else:
+        proba_norm = (s - p_min) / (p_max - p_min)
+
+    # Mix 70% rang + 30% proba absolue normalisée
+    score_final = rang * 0.70 + proba_norm * 0.30
+
+    # Conversion en notes 1-20
+    note_min, note_max = score_final.min(), score_final.max()
+    if note_max - note_min < 1e-6:
+        notes = pd.Series(10, index=s.index)
+    else:
+        notes = ((score_final - note_min) / (note_max - note_min) * 19 + 1)
+        notes = notes.round().clip(1, 20).astype(int)
+
+    # Remettre l'index original
+    notes.index = proba_series.index if hasattr(proba_series, 'index') else notes.index
+    return notes
 
 
 
@@ -970,40 +1024,61 @@ def notes_pmu():
     ).clip(0, 1).fillna(s_cote_rang.clip(0, 1))
 
     # ════════════════════════════════════════════════════════════
-    # SCORING FINAL — Architecture V6 (score métier pondéré)
+    # SCORING FINAL
     #
-    # Le pkl V5 (XGBoost) est conservé en mémoire pour compatibilité
-    # et peut être réactivé ci-dessous, mais la note finale repose
-    # désormais exclusivement sur les 6 scores métier déterministes.
+    # Les 6 scores (FORME, DUO, PALMARES, GAINS, ADEQUATION, COTE)
+    # sont déjà calculés ci-dessus depuis les données PMU en temps réel.
     #
-    # Pourquoi ce choix :
-    #   - Le XGBoost V5 a été entraîné sur des features brutes (rapport,
-    #     musique, etc.) sans les scores normalisés V6. Il produit des
-    #     probabilités cohérentes mais moins interprétables.
-    #   - Les 6 scores V6 sont normalisés 0-1, équilibrés entre eux,
-    #     et directement exposés au frontend pour l'affichage radar.
-    #   - Une future V7 pourra ré-entraîner le XGBoost sur les scores V6
-    #     comme features d'entrée (stacking).
-    #
-    # Pour revenir au XGBoost : remplacer score_metier par probas_v5
-    # dans les lignes df_nc['proba_pmu'] et df_nc['note_pmu'] ci-dessous.
+    # Priorité :
+    #   1. XGBoost V8  → entraîné sur les 6 vrais scores (reconstruct_and_train_v8.py)
+    #   2. Fallback V6 → somme pondérée fixe (si V8 non disponible)
     # ════════════════════════════════════════════════════════════
 
-    SCORES_V6 = ['score_forme', 'score_duo', 'score_historique',
-                 'score_gains', 'score_adequation', 'score_cote']
-    POIDS_V6  = [0.21, 0.17, 0.14, 0.08, 0.26, 0.11]
+    SCORES_6 = ['score_forme', 'score_duo', 'score_historique',
+                'score_gains', 'score_adequation', 'score_cote']
+    POIDS_V6 = [0.21, 0.17, 0.14, 0.08, 0.26, 0.11]
 
-    score_metier = sum(df_nc[s] * p for s, p in zip(SCORES_V6, POIDS_V6))
+    # Somme pondérée V6 (toujours calculée — sert de fallback)
+    score_metier = sum(df_nc[s] * p for s, p in zip(SCORES_6, POIDS_V6))
     df_nc['score_metier'] = score_metier
 
-    # Note finale basée sur score_metier (V6)
-    # Pour basculer sur XGBoost V5 : décommenter les 2 lignes suivantes
-    # probas_v5 = _model_pmu.predict_proba(df_nc[_features_pmu])[:, 1]
-    # score_final = probas_v5
-    score_final = score_metier
+    if _use_v7 and _model_v7 is not None:
+        try:
+            # Utiliser les features telles qu'enregistrées dans le pkl
+            # (SCORES_6 pour V8, autres features pour V7.x antérieurs)
+            features_modele = _bundle_v7.get('features', SCORES_6)
+
+            # Construire le DataFrame d'input — toutes les features
+            # doivent être disponibles dans df_nc (calculées ci-dessus)
+            df_input = pd.DataFrame(index=df_nc.index)
+            for feat in features_modele:
+                if feat in df_nc.columns:
+                    df_input[feat] = df_nc[feat]
+                else:
+                    # Feature inconnue → valeur neutre
+                    print(f"⚠️  Feature '{feat}' absente — remplacée par 0.5")
+                    df_input[feat] = 0.5
+
+            probas       = _model_v7.predict_proba(df_input[features_modele])[:, 1]
+            score_final  = pd.Series(probas, index=df_nc.index)
+
+            # Conversion hybride : rang relatif + écarts réels préservés
+            df_nc['note_pmu'] = _proba_to_note_v7(score_final)
+
+            version_utilisee = _bundle_v7.get('version', 'v8')
+
+        except Exception as e:
+            print(f"⚠️  XGBoost predict_proba échoué ({e}) — fallback V6")
+            score_final      = score_metier
+            df_nc['note_pmu'] = _proba_to_note_api(score_final)
+            version_utilisee = "v6_fallback"
+    else:
+        # V6 : somme pondérée fixe
+        score_final      = score_metier
+        df_nc['note_pmu'] = _proba_to_note_api(score_final)
+        version_utilisee = "v6"
 
     df_nc['proba_pmu'] = score_final
-    df_nc['note_pmu']  = _proba_to_note_api(score_final)
 
 
     # ── Résultat JSON (scores détaillés inclus) ───────────────
@@ -1033,7 +1108,7 @@ def notes_pmu():
         "date":     date_str,
         "reunion":  r_num,
         "course":   c_num,
-        "version":  "v6",
+        "version":  version_utilisee,
         "chevaux":  result,
     })
 
@@ -1095,10 +1170,167 @@ def storage_info():
     })
 
 # ============================================================
+# ENTRAÎNEMENT XGBoost V7 — sur les 6 scores métier
+# ============================================================
+def _calculer_scores_historique(df_hist):
+    """
+    Applique le même pipeline de scoring V6 sur le DataFrame historique
+    (qui contient rang_arrivee) pour produire les features d'entraînement V7.
+    Retourne un DataFrame avec les 6 scores + la cible top3.
+    """
+    d = df_hist.dropna(subset=['rang_arrivee', 'note', 'rapport']).copy()
+    if len(d) < 200:
+        return None
+
+    # ── Features de base disponibles dans historique_notes.csv ──
+    # note, rapport, rang_arrivee sont toujours présents.
+    # Les features PMU détaillées (musique, gains, driver…) ne sont PAS
+    # dans l'historique CSV — on calcule des scores simplifiés mais cohérents.
+
+    def _norm(s, lo, hi):
+        return ((s.clip(lo, hi) - lo) / (hi - lo + 1e-9)).clip(0, 1)
+
+    def _norm_rel(s):
+        mn, mx = s.min(), s.max()
+        if mx - mn < 1e-9:
+            return pd.Series(0.5, index=s.index)
+        return ((s - mn) / (mn)) .clip(0, 1) if False else ((s - mn) / (mx - mn)).clip(0, 1)
+
+    def _norm_mix(s, lo, hi):
+        return (_norm(s, lo, hi) * 0.5 + _norm_rel(s) * 0.5).clip(0, 1)
+
+    # Score forme — basé sur note (proxy musique)
+    d['score_forme']      = _norm_mix(d['note'], 0, 20)
+
+    # Score duo — non disponible dans l'historique CSV → valeur neutre 0.5
+    d['score_duo']        = 0.5
+
+    # Score historique — taux top3 par cheval calculé sur l'historique glissant
+    grp = d.groupby('nom')['rang_arrivee'].apply(lambda x: (x <= 3).mean()).rename('hist_top3')
+    d = d.join(grp, on='nom')
+    d['score_historique'] = _norm_mix(d['hist_top3'].fillna(0.3), 0, 0.7)
+
+    # Score gains — non disponible → valeur neutre
+    d['score_gains']      = 0.5
+
+    # Score adéquation — non disponible → valeur neutre
+    d['score_adequation'] = 0.5
+
+    # Score cote — inversement proportionnel au rapport (favori = score élevé)
+    d['score_cote']       = _norm_mix(1.0 / (1.0 + d['rapport']), 0, 0.5)
+
+    d['target_top3'] = (d['rang_arrivee'] <= 3).astype(int)
+
+    SCORES = ['score_forme', 'score_duo', 'score_historique',
+              'score_gains', 'score_adequation', 'score_cote']
+    return d[SCORES + ['target_top3', 'date']].dropna()
+
+
+def _entrainer_v7():
+    """
+    Entraîne un XGBoost sur les 6 scores V6 depuis l'historique.
+    - Si model_pmu_v7.pkl existe déjà → le charge directement (pas de réentraînement).
+    - Sinon → entraîne et sauvegarde le pkl.
+    - Le modèle V7 remplace le score_metier pondéré dans /notes_pmu.
+    """
+    global _model_v7, _use_v7
+
+    # ── Charger le pkl V7 s'il existe déjà ──
+    if os.path.exists(PMU_V7_PATH):
+        try:
+            with open(PMU_V7_PATH, 'rb') as f:
+                bundle = pickle.load(f)
+            _model_v7  = bundle['model']
+            _bundle_v7 = bundle
+            _use_v7    = True
+            acc = bundle.get('accuracy_top3', '?')
+            ver = bundle.get('version', 'v7')
+            print(f"✅ XGBoost {ver} chargé depuis pkl (accuracy top3 : {acc})")
+            return
+        except Exception as e:
+            print(f"⚠️  Impossible de charger V7 pkl ({e}) — réentraînement")
+
+    # ── Entraîner depuis l'historique ──
+    if not os.path.exists(HISTORIQUE_PATH):
+        print("⚠️  Historique introuvable — XGBoost V7 non entraîné")
+        return
+
+    print("🔄 Entraînement XGBoost V7 sur les 6 scores (historique complet)…")
+    try:
+        from xgboost import XGBClassifier
+
+        df_hist = pd.read_csv(HISTORIQUE_PATH)
+        df_hist['date'] = pd.to_datetime(df_hist['date'])
+
+        df_scores = _calculer_scores_historique(df_hist)
+        if df_scores is None or len(df_scores) < 200:
+            print("⚠️  Pas assez de données pour entraîner V7")
+            return
+
+        SCORES = ['score_forme', 'score_duo', 'score_historique',
+                  'score_gains', 'score_adequation', 'score_cote']
+
+        # Split temporel : entraîner sur tout sauf le dernier mois (validation)
+        df_scores = df_scores.sort_values('date')
+        split_date = df_scores['date'].max() - pd.Timedelta(days=30)
+        train = df_scores[df_scores['date'] < split_date]
+        val   = df_scores[df_scores['date'] >= split_date]
+
+        X_train, y_train = train[SCORES], train['target_top3']
+        X_val,   y_val   = val[SCORES],   val['target_top3']
+
+        # Ratio positif/négatif pour scale_pos_weight
+        neg, pos = (y_train == 0).sum(), (y_train == 1).sum()
+        spw = round(neg / pos, 2) if pos > 0 else 1.0
+
+        clf = XGBClassifier(
+            n_estimators=400,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            scale_pos_weight=spw,
+            use_label_encoder=False,
+            eval_metric='logloss',
+            random_state=42,
+            n_jobs=-1,
+        )
+        clf.fit(X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                verbose=False)
+
+        # Accuracy top3 sur le jeu de validation
+        preds = clf.predict(X_val)
+        accuracy = round((preds == y_val).mean() * 100, 1)
+        print(f"✅ XGBoost V7 entraîné — accuracy top3 val : {accuracy}% "
+              f"({len(train)} train / {len(val)} val)")
+
+        # Importance des features
+        importances = dict(zip(SCORES, clf.feature_importances_.round(3)))
+        print(f"   Importances : {importances}")
+
+        # Sauvegarder le pkl
+        with open(PMU_V7_PATH, 'wb') as f:
+            pickle.dump({'model': clf, 'features': SCORES,
+                         'accuracy_top3': accuracy,
+                         'importances': importances}, f)
+        print(f"✅ model_pmu_v7.pkl sauvegardé")
+
+        _model_v7  = clf
+        _bundle_v7 = {'model': clf, 'features': SCORES, 'note_conversion': 'percentile'}
+        _use_v7    = True
+
+    except Exception as e:
+        print(f"❌ Erreur entraînement V7 : {e}")
+        _use_v7 = False
+
+
+# ============================================================
 # DÉMARRAGE
 # ============================================================
 _charger_modele_pmu()
 initialiser()
+_entrainer_v7()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
