@@ -363,8 +363,9 @@ _mediane_rapport_ref = 18.0
 _hist_snapshot       = None
 _seuils_notes        = None
 
-PMU_MODEL_PATH   = "model_pmu_v5.pkl"
-PMU_V7_PATH      = "model_pmu_v7.pkl"   # XGBoost entraîné sur les 6 scores V6
+PMU_MODEL_PATH      = "model_pmu_v5.pkl"
+PMU_V7_PATH         = "model_pmu_v7.pkl"   # XGBoost entraîné sur les 6 scores V6
+
 
 # Globals V7
 _model_v7        = None   # XGBClassifier entraîné sur scores V6
@@ -400,6 +401,12 @@ def _calculer_hist_snapshot():
 
     tendance = g['rang_arrivee'].apply(_tendance)
 
+    # Courses dans les 60 derniers jours
+    date_max  = hist['date'].max()
+    date_60j  = date_max - pd.Timedelta(days=60)
+    hist_rec  = hist[hist['date'] >= date_60j]
+    courses_60j = hist_rec.groupby('nom')['rang_arrivee'].count().rename('courses_60j')
+
     _hist_snapshot = pd.DataFrame({
         'nom':                nb.index,
         'hist_nb':            nb.values,
@@ -407,7 +414,8 @@ def _calculer_hist_snapshot():
         'hist_moy_classement':moy_cl.values,
         'hist_tendance':      tendance.values,
         'hist_moy_cote':      moy_cote.values,
-    })
+    }).join(courses_60j, on='nom').fillna({'courses_60j': 0})
+    _hist_snapshot['courses_60j'] = _hist_snapshot['courses_60j'].astype(int)
     print(f"✅ hist_snapshot calculé : {len(_hist_snapshot)} chevaux")
 
 
@@ -737,6 +745,7 @@ def notes_pmu():
         if p.get('statut') == 'NON_PARTANT' or p.get('incident') == 'NON_PARTANT':
             continue
         mus        = _parser_musique_api(p.get('musique', ''))
+        musique_brute = p.get('musique', '')
         gains      = p.get('gainsParticipant', {}) or {}
         rk         = p.get('reductionKilometrique', 0) or 0
         num_pmu    = p.get('numPmu')
@@ -798,6 +807,7 @@ def notes_pmu():
             'handicap_distance': float(p.get('handicapDistance', 0) or conditions['distance'] or 0),
             '_cote_app':         cote_app,
         }
+        row['musique'] = musique_brute
         row.update(mus)
         row.update(perf)
         rows.append(row)
@@ -893,9 +903,13 @@ def notes_pmu():
 
     if _hist_snapshot is not None:
         hist_cols_dispo = [c for c in ['nom', 'hist_nb', 'hist_moy_classement', 'hist_nb_top3',
-                            'hist_taux_top3', 'hist_moy_temps', 'hist_tendance', 'hist_moy_cote']
+                            'hist_taux_top3', 'hist_moy_temps', 'hist_tendance', 'hist_moy_cote',
+                            'courses_60j']
                            if c in _hist_snapshot.columns]
         df_nc = df_nc.merge(_hist_snapshot[hist_cols_dispo], on='nom', how='left')
+    if 'courses_60j' not in df_nc.columns:
+        df_nc['courses_60j'] = 0
+    df_nc['courses_60j'] = df_nc['courses_60j'].fillna(0).astype(int)
     for col in ['hist_nb', 'hist_nb_top3']:
         if col not in df_nc.columns:
             df_nc[col] = 0
@@ -1113,7 +1127,9 @@ def notes_pmu():
                 "adequation": int(round(float(row['score_adequation']) * 100)) if pd.notna(row['score_adequation']) else 0,
                 "cote":       int(round(float(row['score_cote'])       * 100)) if pd.notna(row['score_cote'])       else 0,
             },
-            "taux_disq": round(float(row['mus_taux_disq']) * 100, 1) if pd.notna(row.get('mus_taux_disq')) else 0,
+            "taux_disq":    round(float(row['mus_taux_disq']) * 100, 1) if pd.notna(row.get('mus_taux_disq')) else 0,
+            "musique":      str(row.get('musique', '')) if row.get('musique') else '',
+            "courses_60j":  int(row['courses_60j']) if pd.notna(row.get('courses_60j')) else 0,
         })
 
     return jsonify({
