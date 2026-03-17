@@ -746,19 +746,57 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
     df_nc['score_forme'] = (s_score_p*0.30 + s_derniere*0.25 + s_podiums*0.15 +
                             s_disq*0.10 + s_chutes*0.10 + s_age*0.10).clip(0, 1)
 
-    # ── Score duo ────────────────────────────────────────────
-    if _duo_stats is not None:
-        df_nc = df_nc.merge(_duo_stats[['nom','driver','duo_win_rate_bayes','duo_n']],
-                            on=['nom','driver'], how='left')
-    if 'duo_win_rate_bayes' not in df_nc.columns:
-        df_nc['duo_win_rate_bayes'] = fallback
-        df_nc['duo_n'] = 0
-    df_nc['duo_win_rate_bayes'] = df_nc['duo_win_rate_bayes'].fillna(fallback)
-    df_nc['duo_n']              = df_nc['duo_n'].fillna(0)
-    df_nc['duo_fiable']         = (df_nc['duo_n'] >= 2).astype(float)
-    df_nc['score_duo'] = (_norm_mix_g(df_nc['duo_win_rate_bayes'], fallback*0.8, 0.65)*0.60 +
-                          df_nc['duo_fiable']*0.25 +
-                          _norm_mix_g(df_nc['duo_n'], 1, 15)*0.15).clip(0, 1)
+    # ── Score duo / jockey selon discipline ────────────────────
+    if discipline_raw == 'PLAT':
+        # PLAT : score jockey seul (plus informatif que duo cheval+jockey)
+        # On utilise _driver_stats comme proxy du jockey si disponible
+        df_nc['jockey_win_rate_bayes'] = fallback
+        df_nc['jockey_n']              = 0
+        if _driver_stats is not None and 'driver_win_rate_bayes' in _driver_stats.columns:
+            df_nc = df_nc.merge(
+                _driver_stats[['driver','driver_win_rate_bayes','driver_n']],
+                on='driver', how='left')
+            df_nc['jockey_win_rate_bayes'] = df_nc['driver_win_rate_bayes'].fillna(fallback)
+            df_nc['jockey_n']              = df_nc['driver_n'].fillna(0)
+        df_nc['jockey_win_rate_bayes'] = df_nc['jockey_win_rate_bayes'].fillna(fallback)
+        df_nc['jockey_n']              = df_nc['jockey_n'].fillna(0)
+        df_nc['jockey_fiable']         = (df_nc['jockey_n'] >= 5).astype(float)
+        df_nc['score_jockey'] = (_norm_mix_g(df_nc['jockey_win_rate_bayes'], fallback*0.8, 0.35)*0.60 +
+                                  df_nc['jockey_fiable']*0.25 +
+                                  _norm_mix_g(df_nc['jockey_n'], 5, 50)*0.15).clip(0, 1)
+        df_nc['score_duo'] = df_nc['score_jockey']  # alias pour compatibilité JSON
+    elif discipline_raw == 'HAIE':
+        # HAIE : score jockey seul (spécialistes obstacles)
+        df_nc['jockey_win_rate_bayes'] = fallback
+        df_nc['jockey_n']              = 0
+        if _driver_stats is not None and 'driver_win_rate_bayes' in _driver_stats.columns:
+            df_nc = df_nc.merge(
+                _driver_stats[['driver','driver_win_rate_bayes','driver_n']],
+                on='driver', how='left')
+            df_nc['jockey_win_rate_bayes'] = df_nc['driver_win_rate_bayes'].fillna(fallback)
+            df_nc['jockey_n']              = df_nc['driver_n'].fillna(0)
+        df_nc['jockey_win_rate_bayes'] = df_nc['jockey_win_rate_bayes'].fillna(fallback)
+        df_nc['jockey_n']              = df_nc['jockey_n'].fillna(0)
+        df_nc['jockey_fiable']         = (df_nc['jockey_n'] >= 5).astype(float)
+        df_nc['score_jockey'] = (_norm_mix_g(df_nc['jockey_win_rate_bayes'], fallback*0.8, 0.35)*0.60 +
+                                  df_nc['jockey_fiable']*0.25 +
+                                  _norm_mix_g(df_nc['jockey_n'], 5, 50)*0.15).clip(0, 1)
+        df_nc['score_duo'] = df_nc['score_jockey']  # alias
+    else:
+        # MONTE : score duo cheval+jockey classique
+        if _duo_stats is not None:
+            df_nc = df_nc.merge(_duo_stats[['nom','driver','duo_win_rate_bayes','duo_n']],
+                                on=['nom','driver'], how='left')
+        if 'duo_win_rate_bayes' not in df_nc.columns:
+            df_nc['duo_win_rate_bayes'] = fallback
+            df_nc['duo_n'] = 0
+        df_nc['duo_win_rate_bayes'] = df_nc['duo_win_rate_bayes'].fillna(fallback)
+        df_nc['duo_n']              = df_nc['duo_n'].fillna(0)
+        df_nc['duo_fiable']         = (df_nc['duo_n'] >= 2).astype(float)
+        df_nc['score_duo'] = (_norm_mix_g(df_nc['duo_win_rate_bayes'], fallback*0.8, 0.65)*0.60 +
+                              df_nc['duo_fiable']*0.25 +
+                              _norm_mix_g(df_nc['duo_n'], 1, 15)*0.15).clip(0, 1)
+        df_nc['score_jockey'] = df_nc['score_duo']  # alias
 
     # ── Score historique ─────────────────────────────────────
     if _hist_snapshot is not None:
@@ -830,6 +868,7 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
             "scores": {
                 "forme":      int(round(float(row['score_forme'])      * 100)) if pd.notna(row['score_forme'])      else 0,
                 "duo":        int(round(float(row['score_duo'])        * 100)) if pd.notna(row['score_duo'])        else 0,
+                "jockey":     int(round(float(row['score_jockey'])     * 100)) if pd.notna(row.get('score_jockey')) else 0,
                 "historique": int(round(float(row['score_historique']) * 100)) if pd.notna(row['score_historique']) else 0,
                 "gains":      int(round(float(row['score_gains'])      * 100)) if pd.notna(row['score_gains'])      else 0,
                 "handicap":   int(round(float(row['score_handicap'])   * 100)) if pd.notna(row['score_handicap'])   else 0,
@@ -846,7 +885,7 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
         "reunion":    r_num,
         "course":     c_num,
         "discipline": discipline_raw,
-        "version":    f"v1_galop_{discipline_raw.lower()}",
+        "version":    f"v2_galop_{discipline_raw.lower()}",
         "chevaux":    result,
     })
 
