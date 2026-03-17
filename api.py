@@ -364,13 +364,25 @@ _hist_snapshot       = None
 _seuils_notes        = None
 
 PMU_MODEL_PATH      = "model_pmu_v5.pkl"
-PMU_V7_PATH         = "model_pmu_v7.pkl"   # XGBoost entraîné sur les 6 scores V6
+PMU_V7_PATH         = "model_pmu_v7.pkl"   # XGBoost trot attelé
 
+# Modèles galop
+GALOP_MODEL_PATHS = {
+    'PLAT':  "model_pmu_plat.pkl",
+    'HAIE':  "model_pmu_haie.pkl",
+    'MONTE': "model_pmu_monte.pkl",
+}
+DISCIPLINES_TROT  = ('ATTELE', 'TROT_ATTELE')
+DISCIPLINES_GALOP = ('PLAT', 'HAIE', 'MONTE')
+DISCIPLINES_SKIP  = ('STEEPLECHASE', 'CROSS')
 
-# Globals V7
-_model_v7        = None   # XGBClassifier entraîné sur scores V6
-_bundle_v7       = {}     # métadonnées du pkl (features, note_conversion…)
-_use_v7          = False  # True dès que le modèle V7 est prêt
+# Globals V7 (trot attelé)
+_model_v7        = None
+_bundle_v7       = {}
+_use_v7          = False
+
+# Globals galop
+_models_galop    = {}   # {'PLAT': bundle, 'HAIE': bundle, 'MONTE': bundle}
 
 DISC_MUSIQUE_MAP = {'a': 0, 'm': 1, 'p': 2, 'h': 3, 's': 4, 'c': 5}
 DISCIPLINE_MAP   = {'TROT_ATTELE': 0, 'TROT_MONTE': 1, 'PLAT': 2, 'OBSTACLE': 3}
@@ -608,6 +620,7 @@ def _fetch_conditions(date_str, r_num, c_num):
                         'distance':       course.get('distance', 0) or 0,
                         'montant_prix':   course.get('montantPrix', 0) or 0,
                         'discipline':     DISCIPLINE_MAP.get(course.get('discipline',''), 0),
+                        'discipline_raw': course.get('discipline', ''),
                         'corde':          CORDE_MAP.get(course.get('corde',''), 0),
                         'condition_sexe': SEXE_MAP.get(course.get('conditionSexe',''), 2),
                         'nb_partants':    course.get('nombreDeclaresPartants', 0) or 0,
@@ -616,7 +629,7 @@ def _fetch_conditions(date_str, r_num, c_num):
 
 
 def _cond_vides():
-    return {'distance': 0, 'montant_prix': 0, 'discipline': 0,
+    return {'distance': 0, 'montant_prix': 0, 'discipline': 0, 'discipline_raw': '',
             'corde': 0, 'condition_sexe': 2, 'nb_partants': 0}
 
 
@@ -693,6 +706,151 @@ def _proba_to_note_v7(proba_series):
 
 
 
+def _norm_g(s, lo, hi):
+    return ((s.clip(lo, hi) - lo) / (hi - lo + 1e-9)).clip(0, 1)
+
+def _norm_rel_g(s):
+    mn, mx = s.min(), s.max()
+    if mx - mn < 1e-9: return pd.Series(0.5, index=s.index)
+    return ((s - mn) / (mx - mn)).clip(0, 1)
+
+def _norm_mix_g(s, lo, hi, rel=0.5):
+    return (_norm_g(s, lo, hi) * (1-rel) + _norm_rel_g(s) * rel).clip(0, 1)
+
+def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
+    """Pipeline de scoring et prédiction pour les disciplines galop."""
+    prior    = 0.15
+    k_bayes  = 10
+    fallback = prior * k_bayes / (k_bayes + 1)
+
+    # ── Features dérivées ────────────────────────────────────
+    df_nc['ratio_victoires']  = df_nc['nb_victoires'] / (df_nc['nb_courses'] + 1)
+    df_nc['ratio_places']     = df_nc['nb_places']    / (df_nc['nb_courses'] + 1)
+    df_nc['gains_par_course'] = df_nc['gains_carriere'] / (df_nc['nb_courses'] + 1)
+    df_nc['ratio_gains_rec']  = df_nc['gains_annee'] / (df_nc['gains_carriere'] + 1)
+    df_nc['ratio_places_second']    = df_nc['nb_places_second']    / (df_nc['nb_courses'] + 1)
+    df_nc['ratio_places_troisieme'] = df_nc['nb_places_troisieme'] / (df_nc['nb_courses'] + 1)
+    df_nc['rang_cote_course'] = df_nc['rapport_ref'].rank(ascending=True, method='min')
+    nb_ch = len(df_nc)
+    df_nc['rang_cote_norme']  = (df_nc['rang_cote_course'] - 1) / (nb_ch - 1 + 1e-8)
+    df_nc['rang_poids']   = df_nc['handicap_poids'].rank(ascending=True, method='min')
+    df_nc['rang_poids_n'] = (df_nc['rang_poids'] - 1) / (nb_ch - 1 + 1e-8)
+
+    # ── Score forme ──────────────────────────────────────────
+    s_score_p  = _norm_mix_g(df_nc['mus_score_pondere'], 0, 9)
+    s_derniere = _norm_mix_g(15 - df_nc['mus_derniere_place'], 0, 14)
+    s_podiums  = _norm_mix_g(df_nc['mus_nb_podiums'], 0, 5)
+    s_disq     = 1 - _norm_g(df_nc['mus_taux_disq'], 0, 0.3)
+    s_chutes   = 1 - _norm_g(df_nc['mus_nb_tombes'], 0, 3)
+    s_age      = 1 - _norm_g(df_nc['age'].fillna(5), 3, 12)
+    df_nc['score_forme'] = (s_score_p*0.30 + s_derniere*0.25 + s_podiums*0.15 +
+                            s_disq*0.10 + s_chutes*0.10 + s_age*0.10).clip(0, 1)
+
+    # ── Score duo ────────────────────────────────────────────
+    if _duo_stats is not None:
+        df_nc = df_nc.merge(_duo_stats[['nom','driver','duo_win_rate_bayes','duo_n']],
+                            on=['nom','driver'], how='left')
+    if 'duo_win_rate_bayes' not in df_nc.columns:
+        df_nc['duo_win_rate_bayes'] = fallback
+        df_nc['duo_n'] = 0
+    df_nc['duo_win_rate_bayes'] = df_nc['duo_win_rate_bayes'].fillna(fallback)
+    df_nc['duo_n']              = df_nc['duo_n'].fillna(0)
+    df_nc['duo_fiable']         = (df_nc['duo_n'] >= 2).astype(float)
+    df_nc['score_duo'] = (_norm_mix_g(df_nc['duo_win_rate_bayes'], fallback*0.8, 0.65)*0.60 +
+                          df_nc['duo_fiable']*0.25 +
+                          _norm_mix_g(df_nc['duo_n'], 1, 15)*0.15).clip(0, 1)
+
+    # ── Score historique ─────────────────────────────────────
+    if _hist_snapshot is not None:
+        hist_cols = [c for c in ['nom','hist_nb','hist_taux_top3','hist_moy_classement',
+                                  'hist_tendance','hist_moy_cote'] if c in _hist_snapshot.columns]
+        df_nc = df_nc.merge(_hist_snapshot[hist_cols], on='nom', how='left')
+    for col, val in [('hist_nb',0),('hist_taux_top3',fallback),('hist_moy_classement',8),
+                     ('hist_tendance',0),('hist_moy_cote',15)]:
+        if col not in df_nc.columns: df_nc[col] = val
+        df_nc[col] = df_nc[col].fillna(val)
+    hist_cote_med = df_nc['hist_moy_cote'].median()
+    df_nc['score_historique'] = (
+        _norm_mix_g(df_nc['hist_taux_top3'], 0, 0.7)*0.35 +
+        _norm_mix_g(10 - df_nc['hist_moy_classement'], -5, 9)*0.25 +
+        _norm_g(df_nc['hist_nb'], 0, 20)*0.10 +
+        _norm_mix_g(df_nc['hist_tendance'], -3, 3)*0.20 +
+        (1 - _norm_g(df_nc['hist_moy_cote'].fillna(hist_cote_med).fillna(15), 2, 30))*0.10
+    ).clip(0, 1)
+
+    # ── Score gains ──────────────────────────────────────────
+    df_nc['score_gains'] = (
+        _norm_mix_g(df_nc['ratio_victoires'],  0, 0.4)*0.30 +
+        _norm_mix_g(df_nc['gains_par_course'], 0, 8000)*0.25 +
+        _norm_mix_g(df_nc['gains_annee'],      0, 150000)*0.20 +
+        _norm_mix_g(df_nc['ratio_gains_rec'],  0, 0.5)*0.15 +
+        _norm_mix_g(df_nc['ratio_places'],     0, 0.6)*0.10
+    ).clip(0, 1)
+
+    # ── Score handicap ───────────────────────────────────────
+    s_hcap_val   = _norm_mix_g(df_nc['handicap_valeur'].fillna(df_nc['handicap_valeur'].median()), 30, 70)
+    s_poids_rang = df_nc['rang_poids_n']
+    s_poids_abs  = 1 - _norm_g(df_nc['handicap_poids'], 520, 640)
+    df_nc['score_handicap'] = (s_hcap_val*0.50 + s_poids_rang*0.30 + s_poids_abs*0.20).clip(0, 1)
+
+    # ── Score cote ───────────────────────────────────────────
+    s_cote_rang   = 1 - df_nc['rang_cote_norme']
+    s_ecart       = _norm_g(-df_nc['ecart_cotes'].abs(), -10, 0)
+    s_cote_direct = 1 - _norm_mix_g(df_nc['rapport_direct'].fillna(df_nc['rapport_ref']), 2, 50)
+    df_nc['score_cote'] = (s_cote_rang*0.50 + s_cote_direct*0.35 +
+                           s_ecart*0.15).clip(0, 1).fillna(s_cote_rang.clip(0, 1))
+
+    # ── Scoring final via XGBoost galop ──────────────────────
+    bundle_galop = _models_galop[discipline_raw]
+    features_5   = bundle_galop['features']   # SCORES_5_GALOP
+    poids_cote   = bundle_galop.get('poids_cote_fixe', 0.15)
+    poids_xgb    = bundle_galop.get('poids_xgb', 0.85)
+
+    df_input = pd.DataFrame(index=df_nc.index)
+    for feat in features_5:
+        df_input[feat] = df_nc[feat] if feat in df_nc.columns else 0.5
+
+    probas      = bundle_galop['model'].predict_proba(df_input[features_5])[:, 1]
+    score_final = pd.Series(poids_xgb * probas + poids_cote * df_nc['score_cote'].values,
+                            index=df_nc.index)
+    df_nc['note_pmu']  = _proba_to_note_v7(score_final)
+    df_nc['proba_pmu'] = score_final
+
+    # ── Résultat JSON ─────────────────────────────────────────
+    result = []
+    for _, row in df_nc.sort_values('note_pmu', ascending=False).iterrows():
+        result.append({
+            "numero":    int(row['numero']),
+            "nom":       str(row['nom']),
+            "note_pmu":  int(row['note_pmu']),
+            "proba_pmu": round(float(row['proba_pmu']) * 100, 1) if pd.notna(row['proba_pmu']) else 0,
+            "driver":    str(row['driver']),
+            "cote":      float(row['_cote_app']) if pd.notna(row['_cote_app']) else None,
+            "avis":      int(row['avis_entraineur']) if pd.notna(row.get('avis_entraineur')) else 0,
+            "scores": {
+                "forme":      int(round(float(row['score_forme'])      * 100)) if pd.notna(row['score_forme'])      else 0,
+                "duo":        int(round(float(row['score_duo'])        * 100)) if pd.notna(row['score_duo'])        else 0,
+                "historique": int(round(float(row['score_historique']) * 100)) if pd.notna(row['score_historique']) else 0,
+                "gains":      int(round(float(row['score_gains'])      * 100)) if pd.notna(row['score_gains'])      else 0,
+                "handicap":   int(round(float(row['score_handicap'])   * 100)) if pd.notna(row['score_handicap'])   else 0,
+                "cote":       int(round(float(row['score_cote'])       * 100)) if pd.notna(row['score_cote'])       else 0,
+            },
+            "taux_disq":    round(float(row['mus_taux_disq']) * 100, 1) if pd.notna(row.get('mus_taux_disq')) else 0,
+            "musique":      str(row.get('musique', '')) if row.get('musique') else '',
+            "handicap_poids":  int(row.get('handicap_poids', 0)),
+            "handicap_valeur": float(row.get('handicap_valeur', 0)),
+        })
+
+    return jsonify({
+        "date":       date_str,
+        "reunion":    r_num,
+        "course":     c_num,
+        "discipline": discipline_raw,
+        "version":    f"v1_galop_{discipline_raw.lower()}",
+        "chevaux":    result,
+    })
+
+
 @app.route('/notes_pmu', methods=['GET'])
 def notes_pmu():
     """
@@ -715,8 +873,18 @@ def notes_pmu():
         return jsonify({"error": "reunion et course doivent être des entiers"}), 400
 
     # ── Conditions de course & performances détaillées ───────
-    conditions = _fetch_conditions(date_str, r_num, c_num)
-    perfs_map  = _fetch_performances(date_str, r_num, c_num)
+    conditions    = _fetch_conditions(date_str, r_num, c_num)
+    perfs_map     = _fetch_performances(date_str, r_num, c_num)
+    discipline_raw = conditions.get('discipline_raw', '')
+
+    # ── Routing par discipline ────────────────────────────────
+    # STEEPLECHASE et CROSS : non supportés
+    if discipline_raw in DISCIPLINES_SKIP:
+        return jsonify({"error": f"Discipline {discipline_raw} non supportée"}), 400
+    # Galop : PLAT, HAIE, MONTE
+    is_galop = discipline_raw in DISCIPLINES_GALOP
+    if is_galop and discipline_raw not in _models_galop:
+        return jsonify({"error": f"Modèle {discipline_raw} non disponible"}), 503
 
     # ── Participants ──────────────────────────────────────────
     url = (f"https://offline.turfinfo.api.pmu.fr/rest/client/7/programme"
@@ -805,6 +973,8 @@ def notes_pmu():
             'nb_places_troisieme': p.get('nombrePlacesTroisieme', 0) or 0,
             'temps_obtenu':      float(p.get('tempsObtenu', 0) or 0),
             'handicap_distance': float(p.get('handicapDistance', 0) or conditions['distance'] or 0),
+            'handicap_poids':    float(p.get('handicapPoids', 0) or 0),
+            'handicap_valeur':   float(p.get('handicapValeur', 0) or 0),
             '_cote_app':         cote_app,
         }
         row['musique'] = musique_brute
@@ -813,6 +983,12 @@ def notes_pmu():
         rows.append(row)
 
     df_nc = pd.DataFrame(rows)
+
+    # ════════════════════════════════════════════════════════════
+    # ROUTING GALOP — si discipline galop, pipeline dédié
+    # ════════════════════════════════════════════════════════════
+    if is_galop:
+        return _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num)
 
     # ════════════════════════════════════════════════════════════
     # ARCHITECTURE V6 — DEUX ÉTAPES
@@ -1354,11 +1530,33 @@ def _entrainer_v7():
 
 
 # ============================================================
+# CHARGEMENT MODÈLES GALOP
+# ============================================================
+def _charger_modeles_galop():
+    """Charge les modèles XGBoost galop depuis les pkl."""
+    global _models_galop
+    for disc, path in GALOP_MODEL_PATHS.items():
+        if not os.path.exists(path):
+            print(f"⚠️  {path} introuvable — {disc} désactivé")
+            continue
+        try:
+            with open(path, 'rb') as f:
+                bundle = pickle.load(f)
+            _models_galop[disc] = bundle
+            auc = bundle.get('auc_final_val', '?')
+            print(f"✅ Modèle galop {disc} chargé (AUC final: {auc})")
+        except Exception as e:
+            print(f"❌ Erreur chargement {path} : {e}")
+    print(f"✅ {len(_models_galop)} modèles galop chargés")
+
+
+# ============================================================
 # DÉMARRAGE
 # ============================================================
 _charger_modele_pmu()
 initialiser()
 _entrainer_v7()
+_charger_modeles_galop()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
