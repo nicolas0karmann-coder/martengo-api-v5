@@ -195,7 +195,13 @@ def initialiser():
 # ============================================================
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok", "courses": int(df['date'].nunique()) if df is not None else 0})
+    if df is not None and 'r_num' in df.columns and 'c_num' in df.columns:
+        nb_courses = int(df.groupby(['date','r_num','c_num']).ngroups)
+    elif df is not None:
+        nb_courses = int(df['date'].nunique())
+    else:
+        nb_courses = 0
+    return jsonify({"status": "ok", "courses": nb_courses})
 
 
 @app.route('/predict', methods=['POST'])
@@ -382,7 +388,8 @@ _bundle_v7       = {}
 _use_v7          = False
 
 # Globals galop
-_models_galop    = {}   # {'PLAT': bundle, 'HAIE': bundle, 'MONTE': bundle}
+_models_galop       = {}   # {'PLAT': bundle, 'HAIE': bundle, 'MONTE': bundle}
+_jockey_stats_galop = None # stats jockey pour PLAT et HAIE
 
 DISC_MUSIQUE_MAP = {'a': 0, 'm': 1, 'p': 2, 'h': 3, 's': 4, 'c': 5}
 DISCIPLINE_MAP   = {'TROT_ATTELE': 0, 'TROT_MONTE': 1, 'PLAT': 2, 'OBSTACLE': 3}
@@ -747,34 +754,24 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
                             s_disq*0.10 + s_chutes*0.10 + s_age*0.10).clip(0, 1)
 
     # ── Score duo / jockey selon discipline ────────────────────
-    if discipline_raw == 'PLAT':
-        # PLAT : score jockey seul (plus informatif que duo cheval+jockey)
-        # On utilise _driver_stats comme proxy du jockey si disponible
+    if discipline_raw in ('PLAT', 'HAIE'):
+        # PLAT et HAIE : score jockey seul depuis historique_galop.csv
         df_nc['jockey_win_rate_bayes'] = fallback
         df_nc['jockey_n']              = 0
-        if _driver_stats is not None and 'driver_win_rate_bayes' in _driver_stats.columns:
+        jockey_source = _jockey_stats_galop if _jockey_stats_galop is not None else (
+            _driver_stats if _driver_stats is not None and 'driver_win_rate_bayes' in _driver_stats.columns else None
+        )
+        if jockey_source is not None:
+            df_nc['_driver_clean'] = df_nc['driver'].str.strip().str.upper()
+            jockey_merge = jockey_source.copy()
+            jockey_merge['driver'] = jockey_merge['driver'].str.strip().str.upper()
             df_nc = df_nc.merge(
-                _driver_stats[['driver','driver_win_rate_bayes','driver_n']],
-                on='driver', how='left')
+                jockey_merge[['driver','driver_win_rate_bayes','driver_n']],
+                left_on='_driver_clean', right_on='driver', how='left',
+                suffixes=('','_jk'))
             df_nc['jockey_win_rate_bayes'] = df_nc['driver_win_rate_bayes'].fillna(fallback)
             df_nc['jockey_n']              = df_nc['driver_n'].fillna(0)
-        df_nc['jockey_win_rate_bayes'] = df_nc['jockey_win_rate_bayes'].fillna(fallback)
-        df_nc['jockey_n']              = df_nc['jockey_n'].fillna(0)
-        df_nc['jockey_fiable']         = (df_nc['jockey_n'] >= 5).astype(float)
-        df_nc['score_jockey'] = (_norm_mix_g(df_nc['jockey_win_rate_bayes'], fallback*0.8, 0.35)*0.60 +
-                                  df_nc['jockey_fiable']*0.25 +
-                                  _norm_mix_g(df_nc['jockey_n'], 5, 50)*0.15).clip(0, 1)
-        df_nc['score_duo'] = df_nc['score_jockey']  # alias pour compatibilité JSON
-    elif discipline_raw == 'HAIE':
-        # HAIE : score jockey seul (spécialistes obstacles)
-        df_nc['jockey_win_rate_bayes'] = fallback
-        df_nc['jockey_n']              = 0
-        if _driver_stats is not None and 'driver_win_rate_bayes' in _driver_stats.columns:
-            df_nc = df_nc.merge(
-                _driver_stats[['driver','driver_win_rate_bayes','driver_n']],
-                on='driver', how='left')
-            df_nc['jockey_win_rate_bayes'] = df_nc['driver_win_rate_bayes'].fillna(fallback)
-            df_nc['jockey_n']              = df_nc['driver_n'].fillna(0)
+            df_nc.drop(columns=['_driver_clean','driver_jk'], errors='ignore', inplace=True)
         df_nc['jockey_win_rate_bayes'] = df_nc['jockey_win_rate_bayes'].fillna(fallback)
         df_nc['jockey_n']              = df_nc['jockey_n'].fillna(0)
         df_nc['jockey_fiable']         = (df_nc['jockey_n'] >= 5).astype(float)
@@ -1569,6 +1566,30 @@ def _entrainer_v7():
 
 
 # ============================================================
+# STATS JOCKEY GALOP
+# ============================================================
+def _charger_jockey_stats_galop():
+    """Charge les stats jockey depuis les pkl PLAT et HAIE."""
+    global _jockey_stats_galop
+    # Les stats sont embarquées dans model_pmu_plat.pkl
+    for pkl_path in [GALOP_MODEL_PATHS.get('PLAT'), GALOP_MODEL_PATHS.get('HAIE')]:
+        if not pkl_path or not os.path.exists(pkl_path):
+            continue
+        try:
+            with open(pkl_path, 'rb') as f:
+                bundle = pickle.load(f)
+            if 'jockey_stats' in bundle:
+                _jockey_stats_galop = bundle['jockey_stats']
+                n = len(_jockey_stats_galop)
+                mx = _jockey_stats_galop['driver_win_rate_bayes'].max()
+                print(f"✅ Stats jockey galop chargées depuis {pkl_path} : {n} jockeys (max={mx:.3f})")
+                return
+        except Exception as e:
+            print(f"⚠️  Erreur lecture jockey_stats depuis {pkl_path} : {e}")
+    print("⚠️  jockey_stats non trouvées dans les pkl — score_jockey au fallback")
+
+
+# ============================================================
 # CHARGEMENT MODÈLES GALOP
 # ============================================================
 def _charger_modeles_galop():
@@ -1596,6 +1617,7 @@ _charger_modele_pmu()
 initialiser()
 _entrainer_v7()
 _charger_modeles_galop()
+_charger_jockey_stats_galop()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
