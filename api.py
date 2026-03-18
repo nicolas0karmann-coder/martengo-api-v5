@@ -215,8 +215,8 @@ def programme():
                 c_num   = course.get('numOrdre') or course.get('numExterne')
                 heure_ts = course.get('heureDepart', 0) or 0
                 if heure_ts:
-                    from datetime import datetime as dt
-                    heure = dt.fromtimestamp(heure_ts/1000).strftime('%H:%M')
+                    from datetime import datetime as dt, timedelta
+                    heure = (dt.fromtimestamp(heure_ts/1000) + timedelta(hours=1)).strftime('%H:%M')
                 else:
                     heure = '—'
                 courses.append({
