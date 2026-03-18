@@ -193,6 +193,46 @@ def initialiser():
 # ============================================================
 # ROUTES API
 # ============================================================
+@app.route('/programme', methods=['GET'])
+def programme():
+    """Proxy vers l'API PMU — retourne le programme du jour."""
+    date_str = request.args.get('date', '')
+    if not date_str:
+        from datetime import datetime
+        date_str = datetime.now().strftime('%d%m%Y')
+    try:
+        url  = f"https://offline.turfinfo.api.pmu.fr/rest/client/7/programme/{date_str}"
+        resp = http_requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return jsonify({"error": f"API PMU {resp.status_code}"}), resp.status_code
+        data = resp.json()
+        courses = []
+        for reunion in data.get('programme', {}).get('reunions', []):
+            r_num = reunion.get('numOfficiel') or reunion.get('numReunion')
+            lieu  = (reunion.get('hippodrome') or {}).get('libelleCourt', '') or \
+                    (reunion.get('hippodrome') or {}).get('libelleLong', '')
+            for course in reunion.get('courses', []):
+                c_num   = course.get('numOrdre') or course.get('numExterne')
+                heure_ts = course.get('heureDepart', 0) or 0
+                if heure_ts:
+                    from datetime import datetime as dt
+                    heure = dt.fromtimestamp(heure_ts/1000).strftime('%H:%M')
+                else:
+                    heure = '—'
+                courses.append({
+                    'r_num':   r_num,
+                    'c_num':   c_num,
+                    'disc':    course.get('discipline', ''),
+                    'dist':    course.get('distance', 0) or 0,
+                    'lieu':    lieu,
+                    'heure':   heure,
+                    'libelle': course.get('libelle', '') or course.get('libelleCourt', ''),
+                })
+        return jsonify({'date': date_str, 'courses': courses})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+
 @app.route('/health', methods=['GET'])
 def health():
     if df is not None and 'r_num' in df.columns and 'c_num' in df.columns:
