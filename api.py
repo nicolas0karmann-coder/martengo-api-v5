@@ -851,9 +851,7 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
 
     # ── Scoring final via XGBoost galop ──────────────────────
     bundle_galop = _models_galop[discipline_raw]
-    features_5   = bundle_galop['features']   # SCORES_5_GALOP
-    poids_cote   = bundle_galop.get('poids_cote_fixe', 0.15)
-    poids_xgb    = bundle_galop.get('poids_xgb', 0.85)
+    features_5   = bundle_galop['features']
 
     df_input = pd.DataFrame(index=df_nc.index)
     for feat in features_5:
