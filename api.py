@@ -886,9 +886,8 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
         df_input[feat] = df_nc[feat] if feat in df_nc.columns else 0.5
 
     probas      = bundle_galop['model'].predict_proba(df_input[features_5])[:, 1]
-    # Score final = XGBoost pur (score_cote exclu de la note)
-    # La cote sert uniquement à colorier l'indice de confiance côté front
-    score_final = pd.Series(probas, index=df_nc.index)
+    score_final = pd.Series(poids_xgb * probas + poids_cote * df_nc['score_cote'].values,
+                            index=df_nc.index)
     df_nc['note_pmu']  = _proba_to_note_v7(score_final)
     df_nc['proba_pmu'] = score_final
 
@@ -1019,6 +1018,11 @@ def notes_pmu():
 
         perf = perfs_map.get(num_pmu, _perf_vide())
 
+        # Sexe du cheval
+        _sexe_map = {'MALES':0,'FEMELLES':2,'HONGRES':1,'M':0,'F':2,'H':1,'ENTIER':0,'JUMENT':2}
+        sexe_raw  = str(p.get('sexe') or 'INCONNU').upper()
+        sexe_val  = _sexe_map.get(sexe_raw, 1)  # 1=hongre par défaut
+
         row = {
             'numero':            num_pmu,
             'nom':               p.get('nom', ''),
@@ -1031,6 +1035,7 @@ def notes_pmu():
             'nb_partants':       conditions['nb_partants'],
             # Cheval
             'age':               p.get('age', 0) or 0,
+            'sexe':              sexe_val,
             'deferre':           _ferrage_map_pmu.get(p.get('deferre', 'FERRE'), 0),
             'oeilleres':         1 if p.get('oeilleres') else 0,
             'driver':            driver_nom,
@@ -1040,7 +1045,8 @@ def notes_pmu():
             'nb_places':         nb_places,
             'gains_carriere':    gains_car,
             'gains_annee':       gains_ann,
-            'reduction_km_corr': rk if rk > 0 else 72600,
+            'gains_place':       gains.get('gainsPlace', 0) or 0,
+            'reduction_km_corr': rk if rk > 0 else 0,
             'avis_entraineur':   _avis_map_pmu.get(p.get('avisEntraineur', 'NEUTRE'), 0),
             'rapport_ref':       float(rapport_ref),
             'rapport_direct':    float(cote_app) if cote_app else float(rapport_ref),
@@ -1073,285 +1079,126 @@ def notes_pmu():
     # Étape 2 : XGBoost sur ces 6 scores uniquement
     # ════════════════════════════════════════════════════════════
 
-    # ── Features dérivées brutes (inchangées) ─────────────────
+    # ════════════════════════════════════════════════════════════
+    # PIPELINE V8 — FEATURES BRUTES DIRECTEMENT DANS XGBOOST
+    # 20 features sans regroupement en scores familles
+    # ════════════════════════════════════════════════════════════
+
+    # ── Features dérivées ─────────────────────────────────────
     df_nc['ratio_victoires']        = df_nc['nb_victoires'] / (df_nc['nb_courses'] + 1)
     df_nc['ratio_places']           = df_nc['nb_places']    / (df_nc['nb_courses'] + 1)
     df_nc['gains_par_course']       = df_nc['gains_carriere'] / (df_nc['nb_courses'] + 1)
     df_nc['ratio_gains_rec']        = df_nc['gains_annee'] / (df_nc['gains_carriere'] + 1)
-    df_nc['ratio_places_second']    = df_nc['nb_places_second']    / (df_nc['nb_courses'] + 1)
-    df_nc['ratio_places_troisieme'] = df_nc['nb_places_troisieme'] / (df_nc['nb_courses'] + 1)
-    df_nc['temps_norme'] = df_nc.apply(
-        lambda r: round(r['temps_obtenu'] / r['handicap_distance'], 4)
-        if r['handicap_distance'] > 0 and r['temps_obtenu'] > 0 else np.nan, axis=1
-    )
-    df_nc['log_distance']     = np.log1p(df_nc['distance'])
-    df_nc['log_montant_prix'] = np.log1p(df_nc['montant_prix'])
-    df_nc['rang_cote_course'] = df_nc['rapport_ref'].rank(ascending=True, method='min')
-    nb_ch = len(df_nc)
-    df_nc['rang_cote_norme']  = (df_nc['rang_cote_course'] - 1) / (nb_ch - 1 + 1e-8)
+    df_nc['gains_place_par_course'] = df_nc['gains_place'] / (df_nc['nb_courses'] + 1) \
+                                      if 'gains_place' in df_nc.columns else 0.0
+    df_nc['log_montant_prix']       = np.log1p(df_nc['montant_prix'])
+    df_nc['nb_partants_c']          = len(df_nc)
+
+    # Speed rating : reduction_km normalisé
+    df_nc['reduction_km'] = df_nc['reduction_km_corr'].replace(0, np.nan)
+
+    _fallback = _prior_pmu * _k_bayes_pmu / (_k_bayes_pmu + 1)
+
+    # ── Stats driver ──────────────────────────────────────────
+    if _driver_stats is not None:
+        d_cols = ['driver', 'driver_win_rate_bayes', 'driver_n']
+        df_nc = df_nc.merge(_driver_stats[d_cols], on='driver', how='left')
+    if 'driver_win_rate_bayes' not in df_nc.columns:
+        df_nc['driver_win_rate_bayes'] = _fallback
+        df_nc['driver_n']              = 0
+    df_nc['driver_win_rate_bayes'] = df_nc['driver_win_rate_bayes'].fillna(_fallback)
+    df_nc['driver_n']              = df_nc['driver_n'].fillna(0)
+
+    # ── Stats entraîneur ──────────────────────────────────────
+    if _entr_stats is not None:
+        df_nc = df_nc.merge(
+            _entr_stats[['entraineur', 'entr_win_rate_bayes']],
+            on='entraineur', how='left')
+    if 'entr_win_rate_bayes' not in df_nc.columns:
+        df_nc['entr_win_rate_bayes'] = _fallback
+    df_nc['entr_win_rate_bayes'] = df_nc['entr_win_rate_bayes'].fillna(_fallback)
+
+    # ── Stats duo cheval+driver ───────────────────────────────
+    if _duo_stats is not None:
+        df_nc = df_nc.merge(
+            _duo_stats[['nom', 'driver', 'duo_win_rate_bayes']],
+            on=['nom', 'driver'], how='left')
+    if 'duo_win_rate_bayes' not in df_nc.columns:
+        df_nc['duo_win_rate_bayes'] = _fallback
+    df_nc['duo_win_rate_bayes'] = df_nc['duo_win_rate_bayes'].fillna(_fallback)
+
+    # ── Spécialisation distance ───────────────────────────────
     df_nc['tranche_distance'] = pd.cut(
         df_nc['distance'], bins=[0, 1600, 2100, 2700, 9999],
         labels=['court', 'moyen', 'long', 'tres_long']
     ).astype(str)
-
-    _fallback = _prior_pmu * _k_bayes_pmu / (_k_bayes_pmu + 1)
-
-    # Merge stats externes (inchangé)
-    if _le_driver is not None and _driver_stats is not None:
-        top_drivers = set(_le_driver.classes_)
-        df_nc['driver_enc'] = df_nc['driver'].apply(lambda x: x if x in top_drivers else 'AUTRE')
-        df_nc['driver_id']  = _le_driver.transform(df_nc['driver_enc'])
-        d_cols = ['driver', 'driver_win_rate_bayes', 'driver_n']
-        if 'driver_place_rate_bayes' in _driver_stats.columns:
-            d_cols += ['driver_place_rate_bayes', 'driver_disq']
-        df_nc = df_nc.merge(_driver_stats[d_cols], on='driver', how='left')
-        df_nc['driver_win_rate_bayes']   = df_nc['driver_win_rate_bayes'].fillna(_fallback)
-        df_nc['driver_n']                = df_nc['driver_n'].fillna(0)
-        if 'driver_place_rate_bayes' in df_nc.columns:
-            df_nc['driver_place_rate_bayes'] = df_nc['driver_place_rate_bayes'].fillna(_fallback)
-            df_nc['driver_disq']             = df_nc['driver_disq'].fillna(0)
-
-    if _le_entr is not None:
-        top_entrs = set(_le_entr.classes_)
-        df_nc['entraineur_enc'] = df_nc['entraineur'].apply(lambda x: x if x in top_entrs else 'AUTRE')
-        df_nc['entraineur_id']  = _le_entr.transform(df_nc['entraineur_enc'])
-    if _entr_stats is not None:
-        df_nc = df_nc.merge(
-            _entr_stats[['entraineur', 'entr_win_rate_bayes', 'entr_n']],
-            on='entraineur', how='left')
-    if 'entr_win_rate_bayes' not in df_nc.columns:
-        df_nc['entr_win_rate_bayes'] = _fallback
-        df_nc['entr_n'] = 0
-    df_nc['entr_win_rate_bayes'] = df_nc['entr_win_rate_bayes'].fillna(_fallback)
-    df_nc['entr_n']              = df_nc['entr_n'].fillna(0)
-
-    if _duo_stats is not None:
-        df_nc = df_nc.merge(
-            _duo_stats[['nom', 'driver', 'duo_win_rate_bayes', 'duo_n']],
-            on=['nom', 'driver'], how='left')
-    if 'duo_win_rate_bayes' not in df_nc.columns:
-        df_nc['duo_win_rate_bayes'] = _fallback
-        df_nc['duo_n'] = 0
-    df_nc['duo_win_rate_bayes'] = df_nc['duo_win_rate_bayes'].fillna(_fallback)
-    df_nc['duo_n']              = df_nc['duo_n'].fillna(0)
-    df_nc['duo_fiable']         = (df_nc['duo_n'] >= 2).astype(int)
-
     if _spec_dist is not None:
+        # Compatibilité nom de colonne (tranche_distance ou tranche_dist)
+        spec = _spec_dist.copy()
+        if 'tranche_dist' in spec.columns and 'tranche_distance' not in spec.columns:
+            spec = spec.rename(columns={'tranche_dist': 'tranche_distance'})
         df_nc = df_nc.merge(
-            _spec_dist[['nom', 'tranche_distance', 'spec_dist_rate', 'spec_n']],
+            spec[['nom', 'tranche_distance', 'spec_dist_rate']],
             on=['nom', 'tranche_distance'], how='left')
     if 'spec_dist_rate' not in df_nc.columns:
         df_nc['spec_dist_rate'] = _fallback
-        df_nc['spec_n'] = 0
     df_nc['spec_dist_rate'] = df_nc['spec_dist_rate'].fillna(_fallback)
-    df_nc['spec_n']         = df_nc['spec_n'].fillna(0)
 
-    if _spec_disc is not None:
-        df_nc = df_nc.merge(
-            _spec_disc[['nom', 'discipline', 'spec_disc_rate']],
-            on=['nom', 'discipline'], how='left')
-    if 'spec_disc_rate' not in df_nc.columns:
-        df_nc['spec_disc_rate'] = _fallback
-    df_nc['spec_disc_rate'] = df_nc['spec_disc_rate'].fillna(_fallback)
+    # ── Scores familles pour l'affichage front (non utilisés par XGBoost) ──
+    # Calculés uniquement pour l'onglet Analyse
+    df_nc['score_forme']      = (df_nc['mus_score_pondere'] / 9.0).clip(0, 1)
+    df_nc['score_duo']        = df_nc['duo_win_rate_bayes'].clip(0, 1)
+    df_nc['score_gains']      = (df_nc['ratio_victoires'] * 0.5 +
+                                  (df_nc['gains_annee'] / (df_nc['gains_annee'].max() + 1)) * 0.5).clip(0, 1)
+    df_nc['score_adequation'] = df_nc['spec_dist_rate'].clip(0, 1)
+    df_nc['score_historique'] = 0.0  # non utilisé
+    df_nc['score_cote']       = 0.0  # non utilisé
 
-    if _hist_snapshot is not None:
-        hist_cols_dispo = [c for c in ['nom', 'hist_nb', 'hist_moy_classement', 'hist_nb_top3',
-                            'hist_taux_top3', 'hist_moy_temps', 'hist_tendance', 'hist_moy_cote',
-                            'courses_60j']
-                           if c in _hist_snapshot.columns]
-        df_nc = df_nc.merge(_hist_snapshot[hist_cols_dispo], on='nom', how='left')
-    if 'courses_60j' not in df_nc.columns:
-        df_nc['courses_60j'] = 0
-    df_nc['courses_60j'] = df_nc['courses_60j'].fillna(0).astype(int)
-    for col in ['hist_nb', 'hist_nb_top3']:
-        if col not in df_nc.columns:
-            df_nc[col] = 0
-        df_nc[col] = df_nc[col].fillna(0)
-    for col in ['hist_moy_classement', 'hist_taux_top3', 'hist_moy_temps',
-                'hist_tendance', 'hist_moy_cote']:
-        if col not in df_nc.columns:
-            df_nc[col] = np.nan
-
-    # ════════════════════════════════════════════════════════════
-    # ÉTAPE 1 — SCORES MÉTIER (0.0 → 1.0 chacun)
-    # Chaque score résume une dimension indépendante.
-    # Aucune dimension ne peut écraser les autres.
-    # ════════════════════════════════════════════════════════════
-
-    def _norm(series, low, high):
-        """Clip + normalise linéairement entre 0 et 1 (bornes absolues)."""
-        return ((series.clip(low, high) - low) / (high - low + 1e-9)).clip(0, 1)
-
-    def _norm_rel(series):
-        """Normalise relativement au peloton : min→0, max→1.
-        Si tous les chevaux sont identiques, retourne 0.5 pour tous."""
-        mn, mx = series.min(), series.max()
-        if mx - mn < 1e-9:
-            return pd.Series(0.5, index=series.index)
-        return ((series - mn) / (mx - mn)).clip(0, 1)
-
-    def _norm_mix(series, low, high, rel_weight=0.5):
-        """Mix normalisation absolue + relative au peloton."""
-        abs_norm = _norm(series, low, high)
-        rel_norm = _norm_rel(series)
-        return (abs_norm * (1 - rel_weight) + rel_norm * rel_weight).clip(0, 1)
-
-    # ── Score 1 : Forme / Musique ─────────────────────────────
-    s_score_p   = _norm_mix(df_nc['mus_score_pondere'],  0, 9)
-    s_derniere  = _norm_mix(15 - df_nc['mus_derniere_place'], 0, 14)
-    s_podiums   = _norm_mix(df_nc['mus_nb_podiums'],     0, 5)
-    s_disq      = 1 - _norm(df_nc['mus_taux_disq'], 0, 0.3)
-    s_temps_mus = _norm_mix(df_nc['hist_moy_temps'].fillna(df_nc['hist_moy_temps'].median()).fillna(100), 60, 100)
-    s_age       = 1 - _norm(df_nc['age'].fillna(5), 3, 12)        # jeune = meilleur potentiel
-    s_deferre   = df_nc['deferre'].fillna(0).astype(float)        # déferré = signal positif
-
-    df_nc['score_forme'] = (
-        s_score_p   * 0.30 +
-        s_derniere  * 0.25 +
-        s_podiums   * 0.15 +
-        s_disq      * 0.10 +
-        s_temps_mus * 0.10 +
-        s_age       * 0.05 +
-        s_deferre   * 0.05
-    ).clip(0, 1)
-
-    # ── Score 2 : Duo cheval/driver ───────────────────────────
-    s_winrate = _norm_mix(df_nc['duo_win_rate_bayes'], _fallback * 0.8, 0.65)
-    s_fiable  = df_nc['duo_fiable'].astype(float)
-    s_duo_n   = _norm_mix(df_nc['duo_n'], 1, 15)
-
-    df_nc['score_duo'] = (
-        s_winrate * 0.60 +
-        s_fiable  * 0.25 +
-        s_duo_n   * 0.15
-    ).clip(0, 1)
-
-    # ── Score 3 : Historique cheval ───────────────────────────
-    hist_taux   = df_nc['hist_taux_top3'].fillna(_fallback)
-    hist_class  = df_nc['hist_moy_classement'].fillna(8)
-    hist_fiable = _norm(df_nc['hist_nb'], 0, 20)
-    hist_tend   = df_nc['hist_tendance'].fillna(0)
-    hist_cote   = df_nc['hist_moy_cote'].fillna(df_nc['hist_moy_cote'].median()).fillna(15)
-
-    s_taux_top3  = _norm_mix(hist_taux,        0, 0.7)
-    s_classement = _norm_mix(10 - hist_class, -5, 9)
-    s_h_fiable   = hist_fiable
-    s_tendance   = _norm_mix(hist_tend, -3, 3)                    # tendance positive = en forme
-    s_hist_cote  = 1 - _norm(hist_cote, 2, 30)                   # cote historique basse = bon cheval
-
-    df_nc['score_historique'] = (
-        s_taux_top3  * 0.35 +
-        s_classement * 0.25 +
-        s_h_fiable   * 0.10 +
-        s_tendance   * 0.20 +
-        s_hist_cote  * 0.10
-    ).clip(0, 1)
-
-    # ── Score 4 : Gains / Palmarès carrière ───────────────────
-    s_ratio_vic   = _norm_mix(df_nc['ratio_victoires'],  0, 0.4)
-    s_gains_c     = _norm_mix(df_nc['gains_par_course'], 0, 8000)
-    s_gains_ann   = _norm_mix(df_nc['gains_annee'],      0, 150000)
-    s_ratio_gains = _norm_mix(df_nc['ratio_gains_rec'],  0, 0.5)
-    s_ratio_pl    = _norm_mix(df_nc['ratio_places'],     0, 0.6)  # régularité dans le peloton
-
-    df_nc['score_gains'] = (
-        s_ratio_vic   * 0.30 +
-        s_gains_c     * 0.25 +
-        s_gains_ann   * 0.20 +
-        s_ratio_gains * 0.15 +
-        s_ratio_pl    * 0.10
-    ).clip(0, 1)
-
-    # ── Score 5 : Spécialisation / Adéquation course ─────────
-    s_spec_dist  = _norm_mix(df_nc['spec_dist_rate'],       _fallback * 0.8, 0.65)
-    s_spec_disc  = _norm_mix(df_nc['spec_disc_rate'],       _fallback * 0.8, 0.65)
-    s_entr       = _norm_mix(df_nc['entr_win_rate_bayes'],  _fallback * 0.8, 0.55)
-    s_avis       = _norm(df_nc['avis_entraineur'].astype(float), -1, 1)
-
-    df_nc['score_adequation'] = (
-        s_spec_dist * 0.35 +
-        s_spec_disc * 0.25 +
-        s_entr      * 0.25 +
-        s_avis      * 0.15
-    ).clip(0, 1)
-
-    # ── Score 6 : Cote & marché ───────────────────────────────
-    s_cote_rang   = 1 - df_nc['rang_cote_norme']                        # rang inversé : favori = 1
-    s_ecart       = _norm(-df_nc['ecart_cotes'].abs(), -10, 0)          # petite déviation live/ref = bon signe
-    _med_temps    = df_nc['temps_norme'].median()
-    _med_temps    = _med_temps if pd.notna(_med_temps) else 0.0
-    s_temps       = _norm(1 / (1 + df_nc['temps_norme'].fillna(_med_temps)), 0, 1)
-    s_cote_direct = 1 - _norm_mix(df_nc['rapport_direct'].fillna(df_nc['rapport_ref']), 2, 50)  # cote live basse = favori
-
-    df_nc['score_cote'] = (
-        s_cote_rang   * 0.40 +
-        s_cote_direct * 0.30 +
-        s_ecart       * 0.15 +
-        s_temps       * 0.15
-    ).clip(0, 1).fillna(s_cote_rang.clip(0, 1))
-
-    # ════════════════════════════════════════════════════════════
-    # SCORING FINAL
-    #
-    # Les 6 scores (FORME, DUO, PALMARES, GAINS, ADEQUATION, COTE)
-    # sont déjà calculés ci-dessus depuis les données PMU en temps réel.
-    #
-    # Priorité :
-    #   1. XGBoost V8  → entraîné sur les 6 vrais scores (reconstruct_and_train_v8.py)
-    #   2. Fallback V6 → somme pondérée fixe (si V8 non disponible)
-    # ════════════════════════════════════════════════════════════
-
-    SCORES_6 = ['score_forme', 'score_duo', 'score_historique',
-                'score_gains', 'score_adequation', 'score_cote']
-    POIDS_V6 = [0.21, 0.17, 0.14, 0.08, 0.26, 0.11]
-
-    # Somme pondérée V6 (toujours calculée — sert de fallback)
-    score_metier = sum(df_nc[s] * p for s, p in zip(SCORES_6, POIDS_V6))
-    df_nc['score_metier'] = score_metier
+    # ── Prédiction XGBoost V8 ─────────────────────────────────
+    FEATURES_V8 = _bundle_v7.get('features', [
+        'mus_score_pondere', 'mus_tendance', 'mus_regularite',
+        'mus_nb_podiums', 'reduction_km', 'age',
+        'duo_win_rate_bayes', 'driver_win_rate_bayes', 'driver_n',
+        'entr_win_rate_bayes', 'avis_entraineur',
+        'ratio_victoires', 'ratio_places',
+        'gains_par_course', 'gains_annee', 'ratio_gains_rec',
+        'spec_dist_rate', 'nb_partants_c', 'log_montant_prix', 'sexe',
+    ])
 
     if _use_v7 and _model_v7 is not None:
         try:
-            # Utiliser les features telles qu'enregistrées dans le pkl
-            # (SCORES_6 pour V8, autres features pour V7.x antérieurs)
-            features_modele = _bundle_v7.get('features', SCORES_6)
-
-            # Construire le DataFrame d'input — toutes les features
-            # doivent être disponibles dans df_nc (calculées ci-dessus)
             df_input = pd.DataFrame(index=df_nc.index)
-            for feat in features_modele:
+            median_fallback = {
+                'reduction_km': 72600, 'sexe': 1, 'mus_tendance': 0.0,
+                'mus_regularite': 0.5, 'avis_entraineur': 0,
+            }
+            for feat in FEATURES_V8:
                 if feat in df_nc.columns:
                     df_input[feat] = df_nc[feat]
                 else:
-                    # Feature inconnue → valeur neutre
-                    print(f"⚠️  Feature '{feat}' absente — remplacée par 0.5")
-                    df_input[feat] = 0.5
+                    df_input[feat] = median_fallback.get(feat, 0.5)
+                    print(f"⚠️  Feature '{feat}' absente — fallback {median_fallback.get(feat, 0.5)}")
 
-            probas = _model_v7.predict_proba(df_input[features_modele])[:, 1]
-
-            # Score final = XGBoost pur (score_cote exclu de la note)
-            # La cote sert uniquement à colorier l'indice de confiance côté front
+            df_input = df_input.fillna(df_input.median())
+            probas      = _model_v7.predict_proba(df_input[FEATURES_V8])[:, 1]
             score_final = pd.Series(probas, index=df_nc.index)
-
-            # Conversion hybride : rang relatif + écarts réels préservés
             df_nc['note_pmu'] = _proba_to_note_v7(score_final)
-
-            version_utilisee = _bundle_v7.get('version', 'v8')
+            version_utilisee  = _bundle_v7.get('version', 'v8_features_brutes')
 
         except Exception as e:
-            print(f"⚠️  XGBoost predict_proba échoué ({e}) — fallback V6")
-            score_final      = score_metier
-            df_nc['note_pmu'] = _proba_to_note_api(score_final)
-            version_utilisee = "v6_fallback"
+            print(f"⚠️  XGBoost V8 échoué ({e}) — fallback note moyenne")
+            df_nc['note_pmu'] = 10
+            score_final       = pd.Series(0.5, index=df_nc.index)
+            version_utilisee  = "fallback"
     else:
-        # V6 : somme pondérée fixe
-        score_final      = score_metier
-        df_nc['note_pmu'] = _proba_to_note_api(score_final)
-        version_utilisee = "v6"
+        df_nc['note_pmu'] = 10
+        score_final       = pd.Series(0.5, index=df_nc.index)
+        version_utilisee  = "no_model"
 
     df_nc['proba_pmu'] = score_final
 
 
-    # ── Résultat JSON (scores détaillés inclus) ───────────────
+    # ── Résultat JSON ─────────────────────────────────────────
     result = []
     for _, row in df_nc.sort_values('note_pmu', ascending=False).iterrows():
         result.append({
@@ -1362,18 +1209,15 @@ def notes_pmu():
             "driver":    str(row['driver']),
             "cote":      float(row['_cote_app']) if pd.notna(row['_cote_app']) else None,
             "avis":      int(row['avis_entraineur']) if pd.notna(row['avis_entraineur']) else 0,
-            # ✨ V6 — scores détaillés par dimension (0-100)
             "scores": {
                 "forme":      int(round(float(row['score_forme'])      * 100)) if pd.notna(row['score_forme'])      else 0,
                 "duo":        int(round(float(row['score_duo'])        * 100)) if pd.notna(row['score_duo'])        else 0,
-                "historique": int(round(float(row['score_historique']) * 100)) if pd.notna(row['score_historique']) else 0,
                 "gains":      int(round(float(row['score_gains'])      * 100)) if pd.notna(row['score_gains'])      else 0,
                 "adequation": int(round(float(row['score_adequation']) * 100)) if pd.notna(row['score_adequation']) else 0,
-                "cote":       int(round(float(row['score_cote'])       * 100)) if pd.notna(row['score_cote'])       else 0,
             },
-            "taux_disq":    round(float(row['mus_taux_disq']) * 100, 1) if pd.notna(row.get('mus_taux_disq')) else 0,
-            "musique":      str(row.get('musique', '')) if row.get('musique') else '',
-            "courses_60j":  int(row['courses_60j']) if pd.notna(row.get('courses_60j')) else 0,
+            "taux_disq":  round(float(row['mus_taux_disq']) * 100, 1) if pd.notna(row.get('mus_taux_disq')) else 0,
+            "musique":    str(row.get('musique', '')) if row.get('musique') else '',
+            "courses_60j": 0,
         })
 
     return jsonify({
