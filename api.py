@@ -849,14 +849,90 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
     df_nc['score_cote'] = (s_cote_rang*0.50 + s_cote_direct*0.35 +
                            s_ecart*0.15).clip(0, 1).fillna(s_cote_rang.clip(0, 1))
 
+    # ── Features brutes V8 (pour les nouveaux modèles) ──────────
+    # Ces features sont calculées directement depuis les données PMU
+    # et passées au XGBoost V8 sans passer par les scores familles
+
+    # Features dérivées simples
+    df_nc['ratio_victoires']  = df_nc['nb_victoires']  / (df_nc['nb_courses'] + 1)
+    df_nc['ratio_places']     = df_nc['nb_places']     / (df_nc['nb_courses'] + 1)
+    df_nc['gains_par_course'] = df_nc['gains_carriere']/ (df_nc['nb_courses'] + 1)
+    df_nc['ratio_gains_rec']  = df_nc['gains_annee']   / (df_nc['gains_carriere'] + 1)
+    df_nc['log_montant_prix'] = np.log1p(df_nc['montant_prix'])
+    df_nc['nb_partants_c']    = len(df_nc)
+
+    # Sexe du cheval (collecté dans les participants)
+    if 'sexe' not in df_nc.columns:
+        df_nc['sexe'] = 1  # hongre par défaut
+
+    # Stats driver V8 (depuis bundle galop)
+    bundle_galop_tmp = _models_galop.get(discipline_raw, {})
+    driver_stats_v8  = bundle_galop_tmp.get('driver_stats')
+    duo_stats_v8     = bundle_galop_tmp.get('duo_stats')
+    entr_stats_v8    = bundle_galop_tmp.get('entr_stats')
+    spec_dist_v8     = bundle_galop_tmp.get('spec_dist')
+    prior_v8         = bundle_galop_tmp.get('prior_win', fallback)
+    k_v8             = bundle_galop_tmp.get('k_bayes', 10)
+    fallback_v8      = prior_v8 * k_v8 / (k_v8 + 1)
+
+    # Stats driver
+    if driver_stats_v8 is not None and 'driver_win_rate_bayes' in driver_stats_v8.columns:
+        df_nc = df_nc.merge(
+            driver_stats_v8[['driver','driver_win_rate_bayes','driver_n']],
+            on='driver', how='left', suffixes=('','_v8'))
+        df_nc['driver_win_rate_bayes'] = df_nc['driver_win_rate_bayes'].fillna(fallback_v8)
+        df_nc['driver_n']              = df_nc['driver_n'].fillna(0)
+    else:
+        df_nc['driver_win_rate_bayes'] = fallback_v8
+        df_nc['driver_n']              = 0
+
+    # Stats duo
+    if duo_stats_v8 is not None and 'duo_win_rate_bayes' in duo_stats_v8.columns:
+        df_nc = df_nc.merge(
+            duo_stats_v8[['nom','driver','duo_win_rate_bayes']],
+            on=['nom','driver'], how='left', suffixes=('','_v8'))
+        df_nc['duo_win_rate_bayes'] = df_nc['duo_win_rate_bayes'].fillna(fallback_v8)
+    else:
+        df_nc['duo_win_rate_bayes'] = fallback_v8
+
+    # Stats entraîneur
+    if entr_stats_v8 is not None and 'entr_win_rate_bayes' in entr_stats_v8.columns:
+        df_nc = df_nc.merge(
+            entr_stats_v8[['entraineur','entr_win_rate_bayes']],
+            on='entraineur', how='left', suffixes=('','_v8'))
+        df_nc['entr_win_rate_bayes'] = df_nc['entr_win_rate_bayes'].fillna(fallback_v8)
+    else:
+        df_nc['entr_win_rate_bayes'] = fallback_v8
+
+    # Spécialisation distance
+    df_nc['tranche_dist'] = pd.cut(
+        df_nc['distance'], bins=[0,1600,2100,2700,9999],
+        labels=['court','moyen','long','tres_long']
+    ).astype(str)
+    if spec_dist_v8 is not None and 'spec_dist_rate' in spec_dist_v8.columns:
+        spec = spec_dist_v8.copy()
+        if 'tranche_distance' in spec.columns:
+            spec = spec.rename(columns={'tranche_distance':'tranche_dist'})
+        df_nc = df_nc.merge(
+            spec[['nom','tranche_dist','spec_dist_rate']],
+            on=['nom','tranche_dist'], how='left', suffixes=('','_v8'))
+        df_nc['spec_dist_rate'] = df_nc['spec_dist_rate'].fillna(fallback_v8)
+    else:
+        df_nc['spec_dist_rate'] = fallback_v8
+
     # ── Scoring final via XGBoost galop ──────────────────────
     bundle_galop = _models_galop[discipline_raw]
     features_5   = bundle_galop['features']
 
     df_input = pd.DataFrame(index=df_nc.index)
     for feat in features_5:
-        df_input[feat] = df_nc[feat] if feat in df_nc.columns else 0.5
+        if feat in df_nc.columns:
+            df_input[feat] = df_nc[feat]
+        else:
+            print(f"⚠️  Feature galop '{feat}' absente — fallback 0.5")
+            df_input[feat] = 0.5
 
+    df_input = df_input.fillna(df_input.median())
     probas      = bundle_galop['model'].predict_proba(df_input[features_5])[:, 1]
     score_final = pd.Series(probas, index=df_nc.index)
     df_nc['note_pmu']  = _proba_to_note_v7(
