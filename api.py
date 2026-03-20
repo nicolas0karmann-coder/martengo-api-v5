@@ -701,52 +701,23 @@ def _proba_to_note_api(proba_series):
     return pd.Series(proba_series).apply(_convert)
 
 
-def _proba_to_note_v7(proba_series):
+def _proba_to_note_v7(proba_series, seuils_abs=None):
     """
-    Conversion V7 hybride : combine rang relatif + écarts réels.
+    Conversion proba → note 1-20 ABSOLUE (non relative au peloton).
 
-    Problème de la conversion percentile pure :
-      → notes uniformément espacées (2,4,6...20) peu importe les vrais écarts
+    Mapping lineaire fixe calibre sur historique V8 ATTELE :
+      proba 0.00 → note 1
+      proba 0.60 → note 20  (plafond calibre, max observe 0.70)
 
-    Problème des seuils fixes :
-      → saturation à 20 quand les probas sont hautes pour tout le monde
-
-    Solution hybride (70% rang relatif + 30% proba absolue) :
-      → le meilleur du peloton a toujours la note la plus haute (rang relatif)
-      → les écarts entre les notes reflètent les vrais écarts de probabilité
-      → un cheval à 0.95 et un à 0.90 auront des notes différentes
-      → un cheval clairement meilleur (0.90 vs 0.20) aura un écart net
+    Un cheval a 0.30 obtient note 11 que son peloton soit fort ou faible.
+    Un 20 signifie une proba >= 0.60 — cas rare et exceptionnel.
+    La note represente la valeur absolue du cheval, pas son rang dans le peloton.
     """
-    s = pd.Series(proba_series).reset_index(drop=True)
-    n = len(s)
-
-    if n == 1:
-        return pd.Series([20], index=proba_series.index)
-
-    # Composante 1 : rang relatif (0 = pire, 1 = meilleur)
-    rang = s.rank(pct=True, method='average')
-
-    # Composante 2 : proba absolue normalisée sur le peloton courant
-    # (min du peloton → 0, max du peloton → 1)
-    p_min, p_max = s.min(), s.max()
-    if p_max - p_min < 1e-6:
-        proba_norm = pd.Series(0.5, index=s.index)
-    else:
-        proba_norm = (s - p_min) / (p_max - p_min)
-
-    # Mix 70% rang + 30% proba absolue normalisée
-    score_final = rang * 0.70 + proba_norm * 0.30
-
-    # Conversion en notes 1-20
-    note_min, note_max = score_final.min(), score_final.max()
-    if note_max - note_min < 1e-6:
-        notes = pd.Series(10, index=s.index)
-    else:
-        notes = ((score_final - note_min) / (note_max - note_min) * 19 + 1)
-        notes = notes.round().clip(1, 20).astype(int)
-
-    # Remettre l'index original
-    notes.index = proba_series.index if hasattr(proba_series, 'index') else notes.index
+    PROBA_MAX = 0.60
+    s = pd.Series(proba_series)
+    notes = (s / PROBA_MAX * 19 + 1).round().clip(1, 20).astype(int)
+    if hasattr(proba_series, 'index'):
+        notes.index = proba_series.index
     return notes
 
 
