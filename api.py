@@ -701,21 +701,24 @@ def _proba_to_note_api(proba_series):
     return pd.Series(proba_series).apply(_convert)
 
 
-def _proba_to_note_v7(proba_series, seuils_abs=None):
+def _proba_to_note_v7(proba_series, proba_min=None, proba_max=None):
     """
-    Conversion proba → note 1-20 ABSOLUE (non relative au peloton).
+    Conversion proba → note 1-20 ABSOLUE calibrée sur l'historique.
 
-    Mapping lineaire fixe calibre sur historique V8 ATTELE :
-      proba 0.00 → note 1
-      proba 0.60 → note 20  (plafond calibre, max observe 0.70)
+    Les bornes proba_min (P5) et proba_max (P95) sont stockées dans le pkl
+    et calculées sur tout l'historique d'entraînement.
 
-    Un cheval a 0.30 obtient note 11 que son peloton soit fort ou faible.
-    Un 20 signifie une proba >= 0.60 — cas rare et exceptionnel.
-    La note represente la valeur absolue du cheval, pas son rang dans le peloton.
+    Un cheval à proba_min → note 1
+    Un cheval à proba_max → note 20
+    Distribution uniforme ~5% par note.
     """
-    PROBA_MAX = 0.60
+    # Bornes par défaut si pkl pas encore calibré
+    if proba_min is None: proba_min = 0.06
+    if proba_max is None: proba_max = 0.81
+
     s = pd.Series(proba_series)
-    notes = (s / PROBA_MAX * 19 + 1).round().clip(1, 20).astype(int)
+    notes = ((s - proba_min) / (proba_max - proba_min) * 19 + 1)
+    notes = notes.round().clip(1, 20).astype(int)
     if hasattr(proba_series, 'index'):
         notes.index = proba_series.index
     return notes
@@ -857,9 +860,12 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
         df_input[feat] = df_nc[feat] if feat in df_nc.columns else 0.5
 
     probas      = bundle_galop['model'].predict_proba(df_input[features_5])[:, 1]
-    score_final = pd.Series(poids_xgb * probas + poids_cote * df_nc['score_cote'].values,
-                            index=df_nc.index)
-    df_nc['note_pmu']  = _proba_to_note_v7(score_final)
+    score_final = pd.Series(probas, index=df_nc.index)
+    df_nc['note_pmu']  = _proba_to_note_v7(
+        score_final,
+        proba_min=bundle_galop.get('proba_min'),
+        proba_max=bundle_galop.get('proba_max'),
+    )
     df_nc['proba_pmu'] = score_final
 
     # ── Résultat JSON ─────────────────────────────────────────
@@ -1153,7 +1159,11 @@ def notes_pmu():
             df_input = df_input.fillna(df_input.median())
             probas      = _model_v7.predict_proba(df_input[FEATURES_V8])[:, 1]
             score_final = pd.Series(probas, index=df_nc.index)
-            df_nc['note_pmu'] = _proba_to_note_v7(score_final)
+            df_nc['note_pmu'] = _proba_to_note_v7(
+                score_final,
+                proba_min=_bundle_v7.get('proba_min'),
+                proba_max=_bundle_v7.get('proba_max'),
+            )
             version_utilisee  = _bundle_v7.get('version', 'v8_features_brutes')
 
         except Exception as e:
