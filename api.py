@@ -965,10 +965,14 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
         df_nc['note_pmu']  = np.round((score_final - proba_min) / (proba_max - proba_min) * 19 + 1).clip(1, 20).astype(int)
         df_nc['proba_pmu'] = score_final
     else:
-        poids_cote  = bundle_galop.get('poids_cote_fixe', 0.15)
-        poids_xgb   = bundle_galop.get('poids_xgb', 0.85)
-        score_final = pd.Series(poids_xgb * probas + poids_cote * df_nc['score_cote'].values,
-                                index=df_nc.index)
+        # HAIE/MONTE : pipeline brut sans score_cote (comme ATTELÉ et PLAT)
+        poids_cote  = bundle_galop.get('poids_cote_fixe', 0.0)   # fallback 0.0 — cote désactivée
+        poids_xgb   = bundle_galop.get('poids_xgb', 1.0)         # fallback 1.0
+        if poids_cote > 0:
+            score_final = pd.Series(poids_xgb * probas + poids_cote * df_nc['score_cote'].values,
+                                    index=df_nc.index)
+        else:
+            score_final = pd.Series(probas, index=df_nc.index)
         df_nc['note_pmu']  = _proba_to_note_v7(score_final)
         df_nc['proba_pmu'] = score_final
 
