@@ -964,23 +964,21 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
 
     probas = bundle_galop['model'].predict_proba(df_input[features_5])[:, 1]
 
-    # PLAT V8 : pipeline brut sans score_cote (comme ATTELÉ)
+    # PLAT V8 : seuils fixes sur probabilités absolues
     if discipline_raw == 'PLAT':
-        proba_min   = bundle_galop.get('proba_min', 0.19)
-        proba_max   = bundle_galop.get('proba_max', 0.70)
         score_final = pd.Series(probas, index=df_nc.index)
-        df_nc['note_pmu']  = np.round((score_final - proba_min) / (proba_max - proba_min) * 19 + 1).clip(1, 20).astype(int)
+        df_nc['note_pmu']  = _proba_to_note_api(score_final)
         df_nc['proba_pmu'] = score_final
     else:
-        # HAIE/MONTE : pipeline brut sans score_cote (comme ATTELÉ et PLAT)
-        poids_cote  = bundle_galop.get('poids_cote_fixe', 0.0)   # fallback 0.0 — cote désactivée
-        poids_xgb   = bundle_galop.get('poids_xgb', 1.0)         # fallback 1.0
+        # HAIE/MONTE : seuils fixes sur probabilités absolues
+        poids_cote  = bundle_galop.get('poids_cote_fixe', 0.0)
+        poids_xgb   = bundle_galop.get('poids_xgb', 1.0)
         if poids_cote > 0:
             score_final = pd.Series(poids_xgb * probas + poids_cote * df_nc['score_cote'].values,
                                     index=df_nc.index)
         else:
             score_final = pd.Series(probas, index=df_nc.index)
-        df_nc['note_pmu']  = _proba_to_note_v7(score_final)
+        df_nc['note_pmu']  = _proba_to_note_api(score_final)
         df_nc['proba_pmu'] = score_final
 
     # ── Résultat JSON ─────────────────────────────────────────
@@ -1492,8 +1490,8 @@ def notes_pmu():
             probas = _model_v7.predict_proba(df_input[features_modele])[:, 1]
 
             # Combinaison hybride : XGBoost + poids fixe score_cote
-            # Si le pkl définit poids_cote_fixe (modèle V8), on l'applique.
-            # Sinon on utilise les probas brutes (comportement V7 classique).
+            # Si le pkl définit poids_cote_fixe (modèle V9), on l'applique.
+            # Sinon on utilise les probas brutes.
             poids_cote = _bundle_v7.get('poids_cote_fixe', 0.0)
             poids_xgb  = _bundle_v7.get('poids_xgb', 1.0)
             if poids_cote > 0:
@@ -1504,8 +1502,12 @@ def notes_pmu():
             else:
                 score_final = pd.Series(probas, index=df_nc.index)
 
-            # Conversion hybride : rang relatif + écarts réels préservés
-            df_nc['note_pmu'] = _proba_to_note_v7(score_final)
+            # Conversion par seuils fixes sur probabilités absolues :
+            # - reflète les vrais écarts de probabilité entre chevaux
+            # - si deux chevaux ont 53% vs 52%, leurs notes seront proches
+            # - si un cheval domine vraiment (53% vs 25%), l'écart sera grand
+            # - le #1 n'est PAS forcément 20 ni le dernier forcément 1
+            df_nc['note_pmu'] = _proba_to_note_api(score_final)
 
             version_utilisee = _bundle_v7.get('version', 'v8')
 
