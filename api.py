@@ -423,16 +423,16 @@ DISCIPLINES_GALOP = ('PLAT', 'HAIE', 'MONTE')
 DISCIPLINES_SKIP  = ('STEEPLECHASE', 'CROSS')
 
 # Globals V9 (trot attelé)
-_model_v7              = None   # contient le modèle V9
+_model_v7              = None
 _bundle_v7             = {}
 _use_v7                = False
 # Snapshots V9 — forme récente et momentum duo
-_duo_momentum_snap     = None   # DataFrame nom/driver → duo_momentum_3
-_top3_3courses_snap    = None   # DataFrame nom → top3_3courses
-_top3_60j_snap         = None   # DataFrame nom → top3_60j
+_duo_momentum_snap     = None
+_top3_3courses_snap    = None
+_top3_60j_snap         = None
 _fallback_rk_v9        = {'court': 76000, 'moyen': 75100,
                            'long': 76000, 'tres_long': 76500}
-_duo_fiable_seuil_v9   = 5      # seuil duo_n >= 5 (était 2)
+_duo_fiable_seuil_v9   = 5
 
 # Globals galop
 _models_galop       = {}   # {'PLAT': bundle, 'HAIE': bundle, 'MONTE': bundle}
@@ -1199,19 +1199,21 @@ def notes_pmu():
         if 'driver_place_rate_bayes' in _driver_stats.columns:
             d_cols += ['driver_place_rate_bayes', 'driver_disq']
         df_nc = df_nc.merge(_driver_stats[d_cols], on='driver', how='left')
+        df_nc['driver_win_rate_bayes']   = df_nc['driver_win_rate_bayes'].fillna(_fallback)
+        df_nc['driver_n']                = df_nc['driver_n'].fillna(0)
+        if 'driver_place_rate_bayes' in df_nc.columns:
+            df_nc['driver_place_rate_bayes'] = df_nc['driver_place_rate_bayes'].fillna(_fallback)
+            df_nc['driver_disq']             = df_nc['driver_disq'].fillna(0)
     elif _driver_stats is not None:
-        d_cols = ['driver', 'driver_win_rate_bayes', 'driver_n']
-        df_nc = df_nc.merge(_driver_stats[d_cols], on='driver', how='left')
+        df_nc = df_nc.merge(
+            _driver_stats[['driver', 'driver_win_rate_bayes', 'driver_n']],
+            on='driver', how='left')
     if 'driver_win_rate_bayes' not in df_nc.columns:
         df_nc['driver_win_rate_bayes'] = _fallback
         df_nc['driver_n']              = 0
     df_nc['driver_win_rate_bayes'] = df_nc['driver_win_rate_bayes'].fillna(_fallback)
     df_nc['driver_n']              = df_nc['driver_n'].fillna(0)
-    if 'driver_place_rate_bayes' in df_nc.columns:
-        df_nc['driver_place_rate_bayes'] = df_nc['driver_place_rate_bayes'].fillna(_fallback)
-        df_nc['driver_disq']             = df_nc['driver_disq'].fillna(0) if 'driver_disq' in df_nc.columns else 0
 
-    # ── Entraîneur stats ──────────────────────────────────────
     if _le_entr is not None:
         top_entrs = set(_le_entr.classes_)
         df_nc['entraineur_enc'] = df_nc['entraineur'].apply(lambda x: x if x in top_entrs else 'AUTRE')
@@ -1226,7 +1228,6 @@ def notes_pmu():
     df_nc['entr_win_rate_bayes'] = df_nc['entr_win_rate_bayes'].fillna(_fallback)
     df_nc['entr_n']              = df_nc['entr_n'].fillna(0)
 
-    # ── Duo stats ─────────────────────────────────────────────
     if _duo_stats is not None:
         df_nc = df_nc.merge(
             _duo_stats[['nom', 'driver', 'duo_win_rate_bayes', 'duo_n']],
@@ -1236,28 +1237,20 @@ def notes_pmu():
         df_nc['duo_n'] = 0
     df_nc['duo_win_rate_bayes'] = df_nc['duo_win_rate_bayes'].fillna(_fallback)
     df_nc['duo_n']              = df_nc['duo_n'].fillna(0)
-    # V9 : seuil duo_fiable porté à 5 (était 2)
-    df_nc['duo_fiable']    = (df_nc['duo_n'] >= 2).astype(int)   # compatibilité anciens modèles
-    df_nc['duo_fiable_v2'] = (df_nc['duo_n'] >= _duo_fiable_seuil_v9).astype(int)
+    df_nc['duo_fiable']         = (df_nc['duo_n'] >= 2).astype(int)
+    df_nc['duo_fiable_v2']      = (df_nc['duo_n'] >= _duo_fiable_seuil_v9).astype(int)
 
-    # ── Spec dist ─────────────────────────────────────────────
     if _spec_dist is not None:
-        spec_cols = ['nom', 'spec_dist_rate']
-        # V9 : colonne tranche_dist ou tranche_distance selon le pkl
-        if 'tranche_dist' in _spec_dist.columns:
-            spec_cols = ['nom', 'tranche_dist', 'spec_dist_rate']
-            df_nc = df_nc.merge(_spec_dist[spec_cols],
-                                left_on=['nom','tranche_distance'],
-                                right_on=['nom','tranche_dist'], how='left')
-        elif 'tranche_distance' in _spec_dist.columns:
-            df_nc = df_nc.merge(
-                _spec_dist[['nom', 'tranche_distance', 'spec_dist_rate', 'spec_n']],
-                on=['nom', 'tranche_distance'], how='left')
+        spec_cols_dist = 'tranche_dist' if 'tranche_dist' in _spec_dist.columns else 'tranche_distance'
+        df_nc = df_nc.merge(
+            _spec_dist[['nom', spec_cols_dist, 'spec_dist_rate']].rename(
+                columns={spec_cols_dist: 'tranche_distance'}),
+            on=['nom', 'tranche_distance'], how='left')
     if 'spec_dist_rate' not in df_nc.columns:
         df_nc['spec_dist_rate'] = _fallback
         df_nc['spec_n'] = 0
     df_nc['spec_dist_rate'] = df_nc['spec_dist_rate'].fillna(_fallback)
-    df_nc['spec_n']         = df_nc.get('spec_n', pd.Series(0, index=df_nc.index)).fillna(0)
+    df_nc['spec_n']         = df_nc['spec_n'].fillna(0) if 'spec_n' in df_nc.columns else 0
 
     if _spec_disc is not None:
         df_nc = df_nc.merge(
@@ -1267,7 +1260,6 @@ def notes_pmu():
         df_nc['spec_disc_rate'] = _fallback
     df_nc['spec_disc_rate'] = df_nc['spec_disc_rate'].fillna(_fallback)
 
-    # ── Hist snapshot ─────────────────────────────────────────
     if _hist_snapshot is not None:
         hist_cols_dispo = [c for c in ['nom', 'hist_nb', 'hist_moy_classement', 'hist_nb_top3',
                             'hist_taux_top3', 'hist_moy_temps', 'hist_tendance', 'hist_moy_cote',
@@ -1286,14 +1278,9 @@ def notes_pmu():
         if col not in df_nc.columns:
             df_nc[col] = np.nan
 
-    # ════════════════════════════════════════════════════════════
-    # FEATURES V9 — Forme récente & Momentum duo
-    # Jointure sur les snapshots chargés depuis le pkl V9
-    # ════════════════════════════════════════════════════════════
-
+    # ── Features V9 : forme récente & momentum duo ────────────
     prior_v9 = _prior_pmu if _prior_pmu else 0.309
 
-    # ── duo_momentum_3 ────────────────────────────────────────
     if _duo_momentum_snap is not None:
         df_nc = df_nc.merge(
             _duo_momentum_snap[['nom', 'driver', 'duo_momentum_3']],
@@ -1302,7 +1289,6 @@ def notes_pmu():
         df_nc['duo_momentum_3'] = prior_v9
     df_nc['duo_momentum_3'] = df_nc['duo_momentum_3'].fillna(prior_v9)
 
-    # ── top3_3courses ─────────────────────────────────────────
     if _top3_3courses_snap is not None:
         df_nc = df_nc.merge(
             _top3_3courses_snap[['nom', 'top3_3courses']],
@@ -1311,9 +1297,7 @@ def notes_pmu():
         df_nc['top3_3courses'] = prior_v9
     df_nc['top3_3courses'] = df_nc['top3_3courses'].fillna(prior_v9)
 
-    # ── top3_60j ──────────────────────────────────────────────
     if _top3_60j_snap is not None:
-        # La colonne peut s'appeler top3_60j ou top3_60j_snap
         col_60j = 'top3_60j' if 'top3_60j' in _top3_60j_snap.columns else 'top3_60j_snap'
         df_nc = df_nc.merge(
             _top3_60j_snap[['nom', col_60j]].rename(columns={col_60j: 'top3_60j'}),
@@ -1322,17 +1306,14 @@ def notes_pmu():
         df_nc['top3_60j'] = prior_v9
     df_nc['top3_60j'] = df_nc['top3_60j'].fillna(prior_v9)
 
-    # ── reduction_km_v2 (fallback corrigé) ───────────────────
+    # ── reduction_km_v2 (fallback corrigé par tranche) ────────
     def _get_rk_v2(row):
         rk = row.get('reduction_km_corr', 0)
         if rk and rk > 0 and rk != 72600:
             return rk
-        tranche = row.get('tranche_distance', 'long')
-        return _fallback_rk_v9.get(str(tranche), 76100)
-
+        return _fallback_rk_v9.get(str(row.get('tranche_distance', 'long')), 76100)
     df_nc['reduction_km_v2'] = df_nc.apply(_get_rk_v2, axis=1)
-    # Alias reduction_km pour compatibilité feature name dans le pkl
-    df_nc['reduction_km'] = df_nc['reduction_km_v2']
+    df_nc['reduction_km']    = df_nc['reduction_km_v2']
 
     # ════════════════════════════════════════════════════════════
     # ÉTAPE 1 — SCORES MÉTIER (0.0 → 1.0 chacun)
@@ -1456,12 +1437,11 @@ def notes_pmu():
     # SCORING FINAL
     #
     # Les 6 scores (FORME, DUO, PALMARES, GAINS, ADEQUATION, COTE)
-    # sont calculés ci-dessus depuis les données PMU en temps réel.
+    # sont déjà calculés ci-dessus depuis les données PMU en temps réel.
     #
     # Priorité :
-    #   1. XGBoost V9  → 24 features brutes dont duo_momentum_3,
-    #                     top3_3courses, top3_60j (model_pmu_v9_attele.pkl)
-    #   2. Fallback V6 → somme pondérée fixe (si V9 non disponible)
+    #   1. XGBoost V8  → entraîné sur les 6 vrais scores (reconstruct_and_train_v8.py)
+    #   2. Fallback V6 → somme pondérée fixe (si V8 non disponible)
     # ════════════════════════════════════════════════════════════
 
     SCORES_6 = ['score_forme', 'score_duo', 'score_historique',
@@ -1673,9 +1653,7 @@ def _calculer_scores_historique(df_hist):
 def _entrainer_v7():
     """
     Charge le modèle V9 attelé depuis model_pmu_v9_attele.pkl.
-    Le pkl contient le modèle XGBoost + tous les snapshots nécessaires
-    à l'inférence (driver_stats, duo_stats, duo_momentum_snap,
-    top3_3courses_snap, top3_60j_snap, entr_stats, spec_dist).
+    Contient le modèle XGBoost + snapshots pour l'inférence.
     Pas de réentraînement au démarrage — uniquement chargement.
     """
     global _model_v7, _bundle_v7, _use_v7
@@ -1697,12 +1675,12 @@ def _entrainer_v7():
         _bundle_v7 = bundle
         _use_v7    = True
 
-        # ── Snapshots V9 ──────────────────────────────────────
+        # Snapshots V9
         _duo_momentum_snap  = bundle.get('duo_momentum_snap')
         _top3_3courses_snap = bundle.get('top3_3courses_snap')
         _top3_60j_snap      = bundle.get('top3_60j_snap')
 
-        # ── Stats (priorité V9, fallback sur globals existants) ──
+        # Stats (priorité V9)
         if bundle.get('driver_stats') is not None:
             _driver_stats = bundle['driver_stats']
         if bundle.get('entr_stats') is not None:
@@ -1712,14 +1690,13 @@ def _entrainer_v7():
         if bundle.get('spec_dist') is not None:
             _spec_dist    = bundle['spec_dist']
 
-        # ── Paramètres ────────────────────────────────────────
         _fallback_rk_v9      = bundle.get('fallback_rk',
                                            {'court': 76000, 'moyen': 75100,
                                             'long': 76000, 'tres_long': 76500})
         _duo_fiable_seuil_v9 = bundle.get('duo_fiable_seuil', 5)
         if bundle.get('prior_win') is not None and _prior_pmu is None:
-            _prior_pmu    = bundle['prior_win']
-            _k_bayes_pmu  = bundle.get('k_bayes', 10)
+            _prior_pmu   = bundle['prior_win']
+            _k_bayes_pmu = bundle.get('k_bayes', 10)
 
         ver  = bundle.get('version', 'v9')
         auc  = bundle.get('auc_val', '?')
@@ -1727,8 +1704,7 @@ def _entrainer_v7():
         n_dm = len(_duo_momentum_snap)  if _duo_momentum_snap  is not None else 0
         n_t3 = len(_top3_3courses_snap) if _top3_3courses_snap is not None else 0
         n_60 = len(_top3_60j_snap)      if _top3_60j_snap      is not None else 0
-
-        print(f"✅ XGBoost {ver} chargé (AUC: {auc} · {nf} features · "
+        print(f"✅ XGBoost {ver} chargé (AUC:{auc} · {nf} features · "
               f"duo_momentum:{n_dm} · top3_3c:{n_t3} · top3_60j:{n_60})")
 
     except Exception as e:
