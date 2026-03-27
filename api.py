@@ -1297,27 +1297,54 @@ def notes_pmu():
     # ── Features V9 : forme récente & momentum duo ────────────
     prior_v9 = _prior_pmu if _prior_pmu else 0.309
 
-    if _duo_momentum_snap is not None:
-        df_nc = df_nc.merge(
-            _duo_momentum_snap[['nom', 'driver', 'duo_momentum_3']],
-            on=['nom', 'driver'], how='left')
+    # ── duo_momentum_3 ────────────────────────────────────────
+    try:
+        if _duo_momentum_snap is not None:
+            snap = _duo_momentum_snap.copy().reset_index()
+            # Normaliser les colonnes selon le format du groupby
+            if 'duo_momentum_3' not in snap.columns:
+                # Format groupby multi-index : (nom, driver) → valeur
+                snap = snap.rename(columns={snap.columns[-1]: 'duo_momentum_3'})
+            if 'nom' in snap.columns and 'driver' in snap.columns and 'duo_momentum_3' in snap.columns:
+                df_nc = df_nc.merge(
+                    snap[['nom', 'driver', 'duo_momentum_3']],
+                    on=['nom', 'driver'], how='left')
+    except Exception as e:
+        print(f"⚠️  duo_momentum_snap merge échoué ({e}) — fallback")
     if 'duo_momentum_3' not in df_nc.columns:
         df_nc['duo_momentum_3'] = prior_v9
     df_nc['duo_momentum_3'] = df_nc['duo_momentum_3'].fillna(prior_v9)
 
-    if _top3_3courses_snap is not None:
-        df_nc = df_nc.merge(
-            _top3_3courses_snap[['nom', 'top3_3courses']],
-            on='nom', how='left')
+    # ── top3_3courses ─────────────────────────────────────────
+    try:
+        if _top3_3courses_snap is not None:
+            snap3 = _top3_3courses_snap.copy().reset_index()
+            if 'top3_3courses' not in snap3.columns:
+                snap3 = snap3.rename(columns={snap3.columns[-1]: 'top3_3courses'})
+            if 'nom' in snap3.columns and 'top3_3courses' in snap3.columns:
+                df_nc = df_nc.merge(
+                    snap3[['nom', 'top3_3courses']],
+                    on='nom', how='left')
+    except Exception as e:
+        print(f"⚠️  top3_3courses_snap merge échoué ({e}) — fallback")
     if 'top3_3courses' not in df_nc.columns:
         df_nc['top3_3courses'] = prior_v9
     df_nc['top3_3courses'] = df_nc['top3_3courses'].fillna(prior_v9)
 
-    if _top3_60j_snap is not None:
-        col_60j = 'top3_60j' if 'top3_60j' in _top3_60j_snap.columns else 'top3_60j_snap'
-        df_nc = df_nc.merge(
-            _top3_60j_snap[['nom', col_60j]].rename(columns={col_60j: 'top3_60j'}),
-            on='nom', how='left')
+    # ── top3_60j ──────────────────────────────────────────────
+    try:
+        if _top3_60j_snap is not None:
+            snap60 = _top3_60j_snap.copy().reset_index()
+            col_60j = next((c for c in snap60.columns
+                            if 'top3_60j' in c or '60j' in c), None)
+            if col_60j and col_60j != 'top3_60j':
+                snap60 = snap60.rename(columns={col_60j: 'top3_60j'})
+            if 'nom' in snap60.columns and 'top3_60j' in snap60.columns:
+                df_nc = df_nc.merge(
+                    snap60[['nom', 'top3_60j']],
+                    on='nom', how='left')
+    except Exception as e:
+        print(f"⚠️  top3_60j_snap merge échoué ({e}) — fallback")
     if 'top3_60j' not in df_nc.columns:
         df_nc['top3_60j'] = prior_v9
     df_nc['top3_60j'] = df_nc['top3_60j'].fillna(prior_v9)
