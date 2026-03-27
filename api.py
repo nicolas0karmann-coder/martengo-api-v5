@@ -717,49 +717,44 @@ def _proba_to_note_api(proba_series):
     return pd.Series(proba_series).apply(_convert)
 
 
-def _proba_to_note_v7(proba_series):
+def _proba_to_note_v7(proba_series, proba_min_ref=None, proba_max_ref=None):
     """
-    Conversion V7 hybride : combine rang relatif + écarts réels.
+    Conversion V9 : seuils fixes calibrés sur la plage réelle du modèle.
 
-    Problème de la conversion percentile pure :
-      → notes uniformément espacées (2,4,6...20) peu importe les vrais écarts
-
-    Problème des seuils fixes :
-      → saturation à 20 quand les probas sont hautes pour tout le monde
-
-    Solution hybride (70% rang relatif + 30% proba absolue) :
-      → le meilleur du peloton a toujours la note la plus haute (rang relatif)
-      → les écarts entre les notes reflètent les vrais écarts de probabilité
-      → un cheval à 0.95 et un à 0.90 auront des notes différentes
-      → un cheval clairement meilleur (0.90 vs 0.20) aura un écart net
+    Principe :
+      - On étale les 20 niveaux sur la plage [proba_min_ref, proba_max_ref]
+        du modèle (lue depuis le pkl si disponible, sinon estimée sur le peloton).
+      - Deux chevaux avec des probas proches (53% vs 52%) → notes proches ou égales.
+      - Un cheval dominant (53% vs 25%) → écart de notes significatif.
+      - Le #1 n'est PAS forcément 20 ni le dernier forcément 1 :
+        si toute la course est regroupée en [0.25, 0.35], les notes
+        seront toutes dans la même tranche (ex: 5 à 7).
     """
     s = pd.Series(proba_series).reset_index(drop=True)
     n = len(s)
 
     if n == 1:
-        return pd.Series([20], index=proba_series.index)
+        notes = pd.Series([10], index=s.index)
+        notes.index = proba_series.index if hasattr(proba_series, 'index') else notes.index
+        return notes
 
-    # Composante 1 : rang relatif (0 = pire, 1 = meilleur)
-    rang = s.rank(pct=True, method='average')
+    # Bornes de référence — depuis le pkl si disponibles, sinon peloton courant
+    # Le pkl V9 stocke proba_min=0.06 et proba_max=0.81
+    if proba_min_ref is None:
+        proba_min_ref = _bundle_v7.get('proba_min', s.min())
+    if proba_max_ref is None:
+        proba_max_ref = _bundle_v7.get('proba_max', s.max())
 
-    # Composante 2 : proba absolue normalisée sur le peloton courant
-    # (min du peloton → 0, max du peloton → 1)
-    p_min, p_max = s.min(), s.max()
-    if p_max - p_min < 1e-6:
-        proba_norm = pd.Series(0.5, index=s.index)
-    else:
-        proba_norm = (s - p_min) / (p_max - p_min)
-
-    # Mix 70% rang + 30% proba absolue normalisée
-    score_final = rang * 0.70 + proba_norm * 0.30
-
-    # Conversion en notes 1-20
-    note_min, note_max = score_final.min(), score_final.max()
-    if note_max - note_min < 1e-6:
+    plage = proba_max_ref - proba_min_ref
+    if plage < 1e-6:
         notes = pd.Series(10, index=s.index)
-    else:
-        notes = ((score_final - note_min) / (note_max - note_min) * 19 + 1)
-        notes = notes.round().clip(1, 20).astype(int)
+        notes.index = proba_series.index if hasattr(proba_series, 'index') else notes.index
+        return notes
+
+    # Conversion linéaire sur la plage de référence → notes 1-20
+    # note = (proba - proba_min_ref) / plage * 19 + 1
+    notes_float = (s - proba_min_ref) / plage * 19 + 1
+    notes = notes_float.round().clip(1, 20).astype(int)
 
     # Remettre l'index original
     notes.index = proba_series.index if hasattr(proba_series, 'index') else notes.index
@@ -1697,6 +1692,17 @@ def _entrainer_v7():
         if bundle.get('prior_win') is not None and _prior_pmu is None:
             _prior_pmu   = bundle['prior_win']
             _k_bayes_pmu = bundle.get('k_bayes', 10)
+
+        # ── Bornes de probabilité pour la conversion en notes ──
+        # Si le pkl ne les contient pas (V9 Colab), on les estime
+        # depuis prior_win : le modèle produit des probas dans
+        # [prior/3, prior*2.5] environ pour un XGBoost calibré
+        if 'proba_min' not in bundle:
+            prior = bundle.get('prior_win', 0.309)
+            bundle['proba_min'] = round(prior * 0.25, 3)   # ≈ 0.077
+            bundle['proba_max'] = round(min(prior * 2.5, 0.90), 3)  # ≈ 0.773
+            print(f"ℹ️  proba_min/max estimés : [{bundle['proba_min']}, {bundle['proba_max']}]"
+                  f" (prior={prior:.3f})")
 
         ver  = bundle.get('version', 'v9')
         auc  = bundle.get('auc_val', '?')
