@@ -975,7 +975,9 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
                                     index=df_nc.index)
         else:
             score_final = pd.Series(probas, index=df_nc.index)
-        df_nc['note_pmu']  = _proba_to_note_v7(score_final)
+        g_min = bundle_galop.get('proba_min')
+        g_max = bundle_galop.get('proba_max')
+        df_nc['note_pmu']  = _proba_to_note_v7(score_final, proba_min_ref=g_min, proba_max_ref=g_max)
         df_nc['proba_pmu'] = score_final
 
     # ── Résultat JSON ─────────────────────────────────────────
@@ -1479,10 +1481,14 @@ def notes_pmu():
             else:
                 score_final = pd.Series(probas, index=df_nc.index)
 
-            # Conversion hybride : rang relatif + écarts réels préservés
-            df_nc['note_pmu'] = _proba_to_note_v7(score_final)
+            # Conversion en notes : bornes lues depuis le pkl V9
+            p_min = _bundle_v7.get('proba_min')
+            p_max = _bundle_v7.get('proba_max')
+            df_nc['note_pmu'] = _proba_to_note_v7(score_final,
+                                                   proba_min_ref=p_min,
+                                                   proba_max_ref=p_max)
 
-            version_utilisee = _bundle_v7.get('version', 'v8')
+            version_utilisee = _bundle_v7.get('version', 'v9')
 
         except Exception as e:
             print(f"⚠️  XGBoost predict_proba échoué ({e}) — fallback V6")
