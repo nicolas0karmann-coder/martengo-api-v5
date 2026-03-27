@@ -719,45 +719,62 @@ def _proba_to_note_api(proba_series):
 
 def _proba_to_note_v7(proba_series, proba_min_ref=None, proba_max_ref=None):
     """
-    Conversion V9 : seuils fixes calibrés sur la plage réelle du modèle.
+    Conversion V9 : normalisation relative au peloton avec écarts proportionnels.
 
-    Principe :
-      - On étale les 20 niveaux sur la plage [proba_min_ref, proba_max_ref]
-        du modèle (lue depuis le pkl si disponible, sinon estimée sur le peloton).
-      - Deux chevaux avec des probas proches (53% vs 52%) → notes proches ou égales.
-      - Un cheval dominant (53% vs 25%) → écart de notes significatif.
-      - Le #1 n'est PAS forcément 20 ni le dernier forcément 1 :
-        si toute la course est regroupée en [0.25, 0.35], les notes
-        seront toutes dans la même tranche (ex: 5 à 7).
+    Le modèle produit des probas saturées (toutes >0.98) à cause du
+    scale_pos_weight. On normalise donc sur le peloton courant,
+    mais en préservant les vrais écarts relatifs entre chevaux :
+
+    - Si deux chevaux ont proba 0.9893 vs 0.9872, l'écart est 0.0021
+      sur une plage de 0.0021 → notes 20 et 1 (course très serrée)
+    - Si un cheval domine (0.99 vs 0.97), l'écart proportionnel est grand
+      → notes bien espacées
+
+    La clé : on étale les notes sur la plage [min, max] du PELOTON,
+    mais on applique une compression logarithmique pour éviter que
+    des écarts infimes donnent des notes trop espacées.
     """
     s = pd.Series(proba_series).reset_index(drop=True)
-    n = len(s)
+    orig_index = proba_series.index if hasattr(proba_series, 'index') else s.index
 
-    if n == 1:
+    if len(s) == 1:
         notes = pd.Series([10], index=s.index)
-        notes.index = proba_series.index if hasattr(proba_series, 'index') else notes.index
+        notes.index = orig_index
         return notes
 
-    # Bornes de référence — depuis le pkl si disponibles, sinon peloton courant
-    # Le pkl V9 stocke proba_min=0.06 et proba_max=0.81
-    if proba_min_ref is None:
-        proba_min_ref = _bundle_v7.get('proba_min', s.min())
-    if proba_max_ref is None:
-        proba_max_ref = _bundle_v7.get('proba_max', s.max())
+    p_min = s.min()
+    p_max = s.max()
+    plage = p_max - p_min
 
-    plage = proba_max_ref - proba_min_ref
-    if plage < 1e-6:
-        notes = pd.Series(10, index=s.index)
-        notes.index = proba_series.index if hasattr(proba_series, 'index') else notes.index
+    # Si toutes les probas sont identiques → tout le monde à 10
+    if plage < 1e-9:
+        notes = pd.Series([10] * len(s), index=s.index)
+        notes.index = orig_index
         return notes
 
-    # Conversion linéaire sur la plage de référence → notes 1-20
-    # note = (proba - proba_min_ref) / plage * 19 + 1
-    notes_float = (s - proba_min_ref) / plage * 19 + 1
+    # Normalisation relative au peloton : 0 (pire) → 1 (meilleur)
+    norm = (s - p_min) / plage
+
+    # Compression : si l'écart absolu entre le meilleur et le pire
+    # est très faible (<1%), les notes restent groupées autour de 10
+    # Si l'écart est large (>10%), les notes s'étalent de 1 à 20
+    ecart_relatif = plage / (p_max + 1e-9)
+
+    if ecart_relatif < 0.005:
+        # Course très serrée : notes groupées autour de 10 (±2)
+        notes_float = norm * 4 + 8   # plage 8→12
+    elif ecart_relatif < 0.02:
+        # Course modérément serrée : notes groupées (±4)
+        notes_float = norm * 8 + 6   # plage 6→14
+    elif ecart_relatif < 0.05:
+        # Course avec un peu d'écart : notes semi-étalées
+        notes_float = norm * 12 + 4  # plage 4→16
+    else:
+        # Course avec un vrai favori dominant : notes bien étalées
+        notes_float = norm * 19 + 1  # plage 1→20
+
     notes = notes_float.round().clip(1, 20).astype(int)
-
-    # Remettre l'index original
-    notes.index = proba_series.index if hasattr(proba_series, 'index') else notes.index
+    notes.index = orig_index
     return notes
 
 
