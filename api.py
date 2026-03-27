@@ -426,7 +426,6 @@ DISCIPLINES_SKIP  = ('STEEPLECHASE', 'CROSS')
 _model_v7              = None
 _bundle_v7             = {}
 _use_v7                = False
-_calibrator_v9         = None   # IsotonicRegression — calibre les probas
 # Snapshots V9 — forme récente et momentum duo
 _duo_momentum_snap     = None
 _top3_3courses_snap    = None
@@ -434,7 +433,6 @@ _top3_60j_snap         = None
 _fallback_rk_v9        = {'court': 76000, 'moyen': 75100,
                            'long': 76000, 'tres_long': 76500}
 _duo_fiable_seuil_v9   = 5
-_calibrator_v9         = None   # calibrateur isotonique
 
 # Globals galop
 _models_galop       = {}   # {'PLAT': bundle, 'HAIE': bundle, 'MONTE': bundle}
@@ -1488,31 +1486,19 @@ def notes_pmu():
             probas = _model_v7.predict_proba(df_input[features_modele])[:, 1]
 
             # Combinaison hybride : XGBoost + poids fixe score_cote
+            # Si le pkl définit poids_cote_fixe (modèle V8), on l'applique.
+            # Sinon on utilise les probas brutes (comportement V7 classique).
             poids_cote = _bundle_v7.get('poids_cote_fixe', 0.0)
             poids_xgb  = _bundle_v7.get('poids_xgb', 1.0)
             if poids_cote > 0:
-                score_brut = pd.Series(
+                score_final = pd.Series(
                     poids_xgb * probas + poids_cote * df_nc['score_cote'].values,
                     index=df_nc.index
                 )
             else:
-                score_brut = pd.Series(probas, index=df_nc.index)
+                score_final = pd.Series(probas, index=df_nc.index)
 
-            # Appliquer le calibrateur isotonique si disponible
-            # → ramène les probas dans la vraie plage [0, 1]
-            if _calibrator_v9 is not None:
-                try:
-                    score_final = pd.Series(
-                        _calibrator_v9.predict(score_brut.values),
-                        index=df_nc.index
-                    )
-                except Exception as e_cal:
-                    print(f"⚠️  Calibrateur échoué ({e_cal}) — probas brutes utilisées")
-                    score_final = score_brut
-            else:
-                score_final = score_brut
-
-            # Conversion en notes sur la plage calibrée
+            # Conversion en notes : bornes lues depuis le pkl V9
             p_min = _bundle_v7.get('proba_min')
             p_max = _bundle_v7.get('proba_max')
             df_nc['note_pmu'] = _proba_to_note_v7(score_final,
@@ -1689,7 +1675,6 @@ def _entrainer_v7():
     Pas de réentraînement au démarrage — uniquement chargement.
     """
     global _model_v7, _bundle_v7, _use_v7
-    global _calibrator_v9
     global _duo_momentum_snap, _top3_3courses_snap, _top3_60j_snap
     global _fallback_rk_v9, _duo_fiable_seuil_v9
     global _driver_stats, _entr_stats, _duo_stats, _spec_dist
@@ -1707,13 +1692,6 @@ def _entrainer_v7():
         _model_v7  = bundle['model']
         _bundle_v7 = bundle
         _use_v7    = True
-
-        # Calibrateur isotonique (V9_calibre)
-        _calibrator_v9 = bundle.get('calibrator')
-        if _calibrator_v9 is not None:
-            print(f"  ✅ Calibrateur isotonique chargé")
-        else:
-            print(f"  ⚠️  Pas de calibrateur dans le pkl")
 
         # Snapshots V9
         _duo_momentum_snap  = bundle.get('duo_momentum_snap')
