@@ -410,7 +410,7 @@ _hist_snapshot       = None
 _seuils_notes        = None
 
 PMU_MODEL_PATH      = "model_pmu_v5.pkl"
-PMU_V7_PATH         = "model_pmu_v9_attele.pkl"   # XGBoost trot attelé V9
+PMU_V7_PATH         = "model_pmu_v10_attele.pkl"   # XGBoost trot attelé V10
 
 # Modèles galop
 GALOP_MODEL_PATHS = {
@@ -426,10 +426,15 @@ DISCIPLINES_SKIP  = ('STEEPLECHASE', 'CROSS')
 _model_v7              = None
 _bundle_v7             = {}
 _use_v7                = False
+_calibrator_v9         = None   # IsotonicRegression — calibre les probas
 # Snapshots V9 — forme récente et momentum duo
 _duo_momentum_snap     = None
 _top3_3courses_snap    = None
 _top3_60j_snap         = None
+# Snapshots V10 — nouvelles features
+_fraicheur_snap        = None   # fraicheur_jours par cheval
+_progression_snap      = None   # progression_norm par cheval
+_aptitude_snap         = None   # aptitude_piste par cheval/tranche
 _fallback_rk_v9        = {'court': 76000, 'moyen': 75100,
                            'long': 76000, 'tres_long': 76500}
 _duo_fiable_seuil_v9   = 5
@@ -1295,30 +1300,130 @@ def notes_pmu():
     # ── Features V9 : forme récente & momentum duo ────────────
     prior_v9 = _prior_pmu if _prior_pmu else 0.309
 
-    if _duo_momentum_snap is not None:
-        df_nc = df_nc.merge(
-            _duo_momentum_snap[['nom', 'driver', 'duo_momentum_3']],
-            on=['nom', 'driver'], how='left')
+    # ── duo_momentum_3 ────────────────────────────────────────
+    try:
+        if _duo_momentum_snap is not None:
+            snap = _duo_momentum_snap.copy().reset_index()
+            # Normaliser les colonnes selon le format du groupby
+            if 'duo_momentum_3' not in snap.columns:
+                # Format groupby multi-index : (nom, driver) → valeur
+                snap = snap.rename(columns={snap.columns[-1]: 'duo_momentum_3'})
+            if 'nom' in snap.columns and 'driver' in snap.columns and 'duo_momentum_3' in snap.columns:
+                df_nc = df_nc.merge(
+                    snap[['nom', 'driver', 'duo_momentum_3']],
+                    on=['nom', 'driver'], how='left')
+    except Exception as e:
+        print(f"⚠️  duo_momentum_snap merge échoué ({e}) — fallback")
     if 'duo_momentum_3' not in df_nc.columns:
         df_nc['duo_momentum_3'] = prior_v9
     df_nc['duo_momentum_3'] = df_nc['duo_momentum_3'].fillna(prior_v9)
 
-    if _top3_3courses_snap is not None:
-        df_nc = df_nc.merge(
-            _top3_3courses_snap[['nom', 'top3_3courses']],
-            on='nom', how='left')
+    # ── top3_3courses ─────────────────────────────────────────
+    try:
+        if _top3_3courses_snap is not None:
+            snap3 = _top3_3courses_snap.copy().reset_index()
+            if 'top3_3courses' not in snap3.columns:
+                snap3 = snap3.rename(columns={snap3.columns[-1]: 'top3_3courses'})
+            if 'nom' in snap3.columns and 'top3_3courses' in snap3.columns:
+                df_nc = df_nc.merge(
+                    snap3[['nom', 'top3_3courses']],
+                    on='nom', how='left')
+    except Exception as e:
+        print(f"⚠️  top3_3courses_snap merge échoué ({e}) — fallback")
     if 'top3_3courses' not in df_nc.columns:
         df_nc['top3_3courses'] = prior_v9
     df_nc['top3_3courses'] = df_nc['top3_3courses'].fillna(prior_v9)
 
-    if _top3_60j_snap is not None:
-        col_60j = 'top3_60j' if 'top3_60j' in _top3_60j_snap.columns else 'top3_60j_snap'
-        df_nc = df_nc.merge(
-            _top3_60j_snap[['nom', col_60j]].rename(columns={col_60j: 'top3_60j'}),
-            on='nom', how='left')
+    # ── top3_60j ──────────────────────────────────────────────
+    try:
+        if _top3_60j_snap is not None:
+            snap60 = _top3_60j_snap.copy().reset_index()
+            col_60j = next((c for c in snap60.columns
+                            if 'top3_60j' in c or '60j' in c), None)
+            if col_60j and col_60j != 'top3_60j':
+                snap60 = snap60.rename(columns={col_60j: 'top3_60j'})
+            if 'nom' in snap60.columns and 'top3_60j' in snap60.columns:
+                df_nc = df_nc.merge(
+                    snap60[['nom', 'top3_60j']],
+                    on='nom', how='left')
+    except Exception as e:
+        print(f"⚠️  top3_60j_snap merge échoué ({e}) — fallback")
     if 'top3_60j' not in df_nc.columns:
         df_nc['top3_60j'] = prior_v9
     df_nc['top3_60j'] = df_nc['top3_60j'].fillna(prior_v9)
+
+    # ════════════════════════════════════════════════════════════
+    # FEATURES V10 — fraicheur, progression, place_avantage,
+    #                aptitude_piste
+    # ════════════════════════════════════════════════════════════
+
+    # ── fraicheur_score ───────────────────────────────────────
+    # On ne peut pas calculer les jours depuis la dernière course
+    # en temps réel sans l'historique — on utilise le snapshot
+    try:
+        if _fraicheur_snap is not None:
+            snap_f = _fraicheur_snap.copy().reset_index(drop=True)
+            if 'nom' in snap_f.columns and 'fraicheur_jours' in snap_f.columns:
+                df_nc = df_nc.merge(snap_f[['nom','fraicheur_jours']],
+                                    on='nom', how='left')
+    except Exception as e:
+        print(f"⚠️  fraicheur_snap merge échoué ({e})")
+    if 'fraicheur_jours' not in df_nc.columns:
+        df_nc['fraicheur_jours'] = 21.0   # fallback = zone optimale
+    df_nc['fraicheur_jours'] = df_nc['fraicheur_jours'].fillna(21.0)
+
+    def _fraicheur_score(j):
+        if j <= 7:    return 0.3
+        elif j <= 14: return 0.8
+        elif j <= 21: return 1.0
+        elif j <= 30: return 0.9
+        elif j <= 45: return 0.7
+        elif j <= 60: return 0.5
+        else:         return 0.3
+    df_nc['fraicheur_score'] = df_nc['fraicheur_jours'].apply(_fraicheur_score)
+
+    # ── progression_norm ──────────────────────────────────────
+    try:
+        if _progression_snap is not None:
+            snap_p = _progression_snap.copy().reset_index(drop=True)
+            if 'nom' in snap_p.columns and 'progression_norm' in snap_p.columns:
+                df_nc = df_nc.merge(snap_p[['nom','progression_norm']],
+                                    on='nom', how='left')
+    except Exception as e:
+        print(f"⚠️  progression_snap merge échoué ({e})")
+    if 'progression_norm' not in df_nc.columns:
+        df_nc['progression_norm'] = 0.0   # fallback = neutre
+    df_nc['progression_norm'] = df_nc['progression_norm'].fillna(0.0)
+
+    # ── place_avantage ────────────────────────────────────────
+    def _avantage_numero(n):
+        try:
+            n = int(n)
+            if n <= 2:    return 1.0
+            elif n <= 5:  return 0.8
+            elif n <= 8:  return 0.5
+            elif n <= 12: return 0.3
+            else:         return 0.1
+        except:
+            return 0.5
+    df_nc['place_avantage'] = df_nc['numero'].apply(_avantage_numero)
+
+    # ── aptitude_piste ────────────────────────────────────────
+    try:
+        if _aptitude_snap is not None:
+            snap_a = _aptitude_snap.copy().reset_index(drop=True)
+            # Colonne tranche peut s'appeler tranche_distance
+            if 'tranche_distance' in snap_a.columns and \
+               'aptitude_piste' in snap_a.columns and \
+               'nom' in snap_a.columns:
+                df_nc = df_nc.merge(
+                    snap_a[['nom','tranche_distance','aptitude_piste']],
+                    on=['nom','tranche_distance'], how='left')
+    except Exception as e:
+        print(f"⚠️  aptitude_snap merge échoué ({e})")
+    if 'aptitude_piste' not in df_nc.columns:
+        df_nc['aptitude_piste'] = prior_v9
+    df_nc['aptitude_piste'] = df_nc['aptitude_piste'].fillna(prior_v9)
 
     # ── reduction_km_v2 (fallback corrigé par tranche) ────────
     def _get_rk_v2(row):
@@ -1486,19 +1591,31 @@ def notes_pmu():
             probas = _model_v7.predict_proba(df_input[features_modele])[:, 1]
 
             # Combinaison hybride : XGBoost + poids fixe score_cote
-            # Si le pkl définit poids_cote_fixe (modèle V8), on l'applique.
-            # Sinon on utilise les probas brutes (comportement V7 classique).
             poids_cote = _bundle_v7.get('poids_cote_fixe', 0.0)
             poids_xgb  = _bundle_v7.get('poids_xgb', 1.0)
             if poids_cote > 0:
-                score_final = pd.Series(
+                score_brut = pd.Series(
                     poids_xgb * probas + poids_cote * df_nc['score_cote'].values,
                     index=df_nc.index
                 )
             else:
-                score_final = pd.Series(probas, index=df_nc.index)
+                score_brut = pd.Series(probas, index=df_nc.index)
 
-            # Conversion en notes : bornes lues depuis le pkl V9
+            # Appliquer le calibrateur isotonique si disponible
+            # → ramène les probas dans la vraie plage [0, 1]
+            if _calibrator_v9 is not None:
+                try:
+                    score_final = pd.Series(
+                        _calibrator_v9.predict(score_brut.values),
+                        index=df_nc.index
+                    )
+                except Exception as e_cal:
+                    print(f"⚠️  Calibrateur échoué ({e_cal}) — probas brutes utilisées")
+                    score_final = score_brut
+            else:
+                score_final = score_brut
+
+            # Conversion en notes sur la plage calibrée
             p_min = _bundle_v7.get('proba_min')
             p_max = _bundle_v7.get('proba_max')
             df_nc['note_pmu'] = _proba_to_note_v7(score_final,
@@ -1670,18 +1787,20 @@ def _calculer_scores_historique(df_hist):
 
 def _entrainer_v7():
     """
-    Charge le modèle V9 attelé depuis model_pmu_v9_attele.pkl.
-    Contient le modèle XGBoost + snapshots pour l'inférence.
+    Charge le modèle V10 attelé depuis model_pmu_v10_attele.pkl.
+    Contient le modèle XGBoost + calibrateur + snapshots pour l'inférence.
     Pas de réentraînement au démarrage — uniquement chargement.
     """
     global _model_v7, _bundle_v7, _use_v7
+    global _calibrator_v9
     global _duo_momentum_snap, _top3_3courses_snap, _top3_60j_snap
+    global _fraicheur_snap, _progression_snap, _aptitude_snap
     global _fallback_rk_v9, _duo_fiable_seuil_v9
     global _driver_stats, _entr_stats, _duo_stats, _spec_dist
     global _prior_pmu, _k_bayes_pmu
 
     if not os.path.exists(PMU_V7_PATH):
-        print(f"⚠️  {PMU_V7_PATH} introuvable — modèle attelé V9 désactivé")
+        print(f"⚠️  {PMU_V7_PATH} introuvable — modèle attelé V10 désactivé")
         _use_v7 = False
         return
 
@@ -1693,12 +1812,24 @@ def _entrainer_v7():
         _bundle_v7 = bundle
         _use_v7    = True
 
+        # Calibrateur isotonique
+        _calibrator_v9 = bundle.get('calibrator')
+        if _calibrator_v9 is not None:
+            print(f"  ✅ Calibrateur isotonique chargé")
+        else:
+            print(f"  ⚠️  Pas de calibrateur dans le pkl")
+
         # Snapshots V9
         _duo_momentum_snap  = bundle.get('duo_momentum_snap')
         _top3_3courses_snap = bundle.get('top3_3courses_snap')
         _top3_60j_snap      = bundle.get('top3_60j_snap')
 
-        # Stats (priorité V9)
+        # Snapshots V10 — nouvelles features
+        _fraicheur_snap   = bundle.get('fraicheur_snap')
+        _progression_snap = bundle.get('progression_snap')
+        _aptitude_snap    = bundle.get('aptitude_snap')
+
+        # Stats (priorité V10)
         if bundle.get('driver_stats') is not None:
             _driver_stats = bundle['driver_stats']
         if bundle.get('entr_stats') is not None:
