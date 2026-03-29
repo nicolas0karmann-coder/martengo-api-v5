@@ -1666,12 +1666,29 @@ def notes_pmu():
                       f" max={scores_bruts.max():.3f}"
                       f" mean={scores_bruts.mean():.3f}"
                       f" plage={scores_bruts.max()-scores_bruts.min():.3f}")
-                # Compter les features absentes (= 0.5 fallback)
                 n_fallback = sum(1 for feat in features_modele
                                  if feat not in df_nc.columns)
                 if n_fallback > 0:
                     print(f"  [V12] ⚠️  {n_fallback}/{len(features_modele)}"
                           f" features en fallback 0.5")
+
+                # RANKING : convertir les scores BRUTS en notes
+                # Le calibrateur est utilisé uniquement pour proba_pmu (affichage)
+                # mais PAS pour les notes — sinon il écrase les écarts
+                df_nc['note_pmu'] = _proba_to_note_v7(score_brut)
+
+                # Calibrateur pour proba_pmu uniquement (affichage %)
+                if _calibrator_v9 is not None:
+                    try:
+                        score_final = pd.Series(
+                            _calibrator_v9.predict(score_brut.values),
+                            index=df_nc.index)
+                    except Exception:
+                        score_final = score_brut
+                else:
+                    score_final = score_brut
+
+                version_utilisee = _bundle_v7.get('version', 'v12')
             else:
                 # XGBClassifier.predict_proba()
                 probas     = _model_v7.predict_proba(df_input[features_modele])[:, 1]
@@ -1685,23 +1702,25 @@ def notes_pmu():
                     score_brut = pd.Series(probas, index=df_nc.index)
 
             # Calibrateur isotonique → scores → probas calibrées
-            if _calibrator_v9 is not None:
-                try:
-                    score_final = pd.Series(
-                        _calibrator_v9.predict(score_brut.values),
-                        index=df_nc.index)
-                except Exception as e_cal:
-                    print(f"⚠️  Calibrateur échoué ({e_cal}) — scores bruts")
+            # (uniquement pour classification — le ranking gère ça ci-dessus)
+            if model_type != 'ranking':
+                if _calibrator_v9 is not None:
+                    try:
+                        score_final = pd.Series(
+                            _calibrator_v9.predict(score_brut.values),
+                            index=df_nc.index)
+                    except Exception as e_cal:
+                        print(f"⚠️  Calibrateur échoué ({e_cal}) — scores bruts")
+                        score_final = score_brut
+                else:
                     score_final = score_brut
-            else:
-                score_final = score_brut
 
-            # Conversion en notes
-            p_min = _bundle_v7.get('proba_min')
-            p_max = _bundle_v7.get('proba_max')
-            df_nc['note_pmu'] = _proba_to_note_v7(score_final,
-                                                   proba_min_ref=p_min,
-                                                   proba_max_ref=p_max)
+                # Conversion en notes
+                p_min = _bundle_v7.get('proba_min')
+                p_max = _bundle_v7.get('proba_max')
+                df_nc['note_pmu'] = _proba_to_note_v7(score_final,
+                                                       proba_min_ref=p_min,
+                                                       proba_max_ref=p_max)
 
             version_utilisee = _bundle_v7.get('version', 'v12')
 
