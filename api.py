@@ -410,7 +410,7 @@ _hist_snapshot       = None
 _seuils_notes        = None
 
 PMU_MODEL_PATH      = "model_pmu_v5.pkl"
-PMU_V7_PATH         = "model_pmu_v14_attele.pkl"   # XGBoost trot attelé V14 ranking
+PMU_V7_PATH         = "model_pmu_v15_attele.pkl"   # XGBoost trot attelé V15 ranking
 
 # Modèles galop
 GALOP_MODEL_PATHS = {
@@ -437,6 +437,7 @@ _progression_snap      = None   # progression_norm par cheval
 _aptitude_snap         = None   # aptitude_piste par cheval/tranche
 # Snapshots V12 — nouvelles features ranking
 _niveau_snap           = None   # niveau_habituel par cheval
+_confiance_seuils      = {'faible': 1.24, 'moyen': 1.585, 'fort': 1.651}
 _fallback_rk_v9        = {'court': 76000, 'moyen': 75100,
                            'long': 76000, 'tres_long': 76500}
 _duo_fiable_seuil_v9   = 5
@@ -1767,21 +1768,37 @@ def notes_pmu():
                 # XGBRanker.predict() retourne des scores (pas des probas)
                 scores_bruts = _model_v7.predict(df_input[features_modele])
                 score_brut   = pd.Series(scores_bruts, index=df_nc.index)
-                # Diagnostic : log des scores bruts
-                print(f"  [V12] Scores ranking : min={scores_bruts.min():.3f}"
-                      f" max={scores_bruts.max():.3f}"
-                      f" mean={scores_bruts.mean():.3f}"
-                      f" plage={scores_bruts.max()-scores_bruts.min():.3f}")
-                n_fallback = sum(1 for feat in features_modele
-                                 if feat not in df_nc.columns)
-                if n_fallback > 0:
-                    print(f"  [V12] ⚠️  {n_fallback}/{len(features_modele)}"
-                          f" features en fallback 0.5")
 
                 # RANKING : convertir les scores BRUTS en notes
                 # Le calibrateur est utilisé uniquement pour proba_pmu (affichage)
                 # mais PAS pour les notes — sinon il écrase les écarts
                 df_nc['note_pmu'] = _proba_to_note_v7(score_brut)
+
+                # ── Indice de confiance (point 3) ─────────────
+                # Plage des scores bruts = dispersion du peloton
+                plage_scores = float(score_brut.max() - score_brut.min())
+                seuils       = _confiance_seuils
+                if plage_scores < seuils.get('faible', 1.24):
+                    confiance_course = 'faible'
+                elif plage_scores > seuils.get('fort', 1.651):
+                    confiance_course = 'fort'
+                else:
+                    confiance_course = 'moyen'
+                df_nc['_plage_scores']    = plage_scores
+                df_nc['_confiance']       = confiance_course
+
+                # ── Score value (point 4) ──────────────────────
+                # Détecte les outsiders sous-estimés par le marché
+                # score_value = note_pmu / log(cote)
+                # Valeur élevée = cheval bien noté avec grande cote
+                if '_cote_app' in df_nc.columns:
+                    cote_val = df_nc['_cote_app'].fillna(10.0)
+                    cote_val = cote_val.clip(1.1, 200)
+                    df_nc['score_value'] = (
+                        df_nc['note_pmu'] / np.log(cote_val)
+                    ).round(2)
+                else:
+                    df_nc['score_value'] = 0.0
 
                 # Calibrateur pour proba_pmu uniquement (affichage %)
                 if _calibrator_v9 is not None:
@@ -1794,7 +1811,7 @@ def notes_pmu():
                 else:
                     score_final = score_brut
 
-                version_utilisee = _bundle_v7.get('version', 'v12')
+                version_utilisee = _bundle_v7.get('version', 'v15')
             else:
                 # XGBClassifier.predict_proba()
                 probas     = _model_v7.predict_proba(df_input[features_modele])[:, 1]
@@ -1867,14 +1884,23 @@ def notes_pmu():
             "taux_disq":    round(float(row['mus_taux_disq']) * 100, 1) if pd.notna(row.get('mus_taux_disq')) else 0,
             "musique":      str(row.get('musique', '')) if row.get('musique') else '',
             "courses_60j":  int(row['courses_60j']) if pd.notna(row.get('courses_60j')) else 0,
+            "score_value":  round(float(row.get('score_value', 0)), 2),
         })
 
+    # Indice de confiance de la course (calculé sur le peloton)
+    confiance_course = str(df_nc.get('_confiance', pd.Series(['moyen'])).iloc[0]) \
+                       if '_confiance' in df_nc.columns else 'moyen'
+    plage_scores     = round(float(df_nc.get('_plage_scores', pd.Series([0])).iloc[0]), 3) \
+                       if '_plage_scores' in df_nc.columns else 0
+
     return jsonify({
-        "date":     date_str,
-        "reunion":  r_num,
-        "course":   c_num,
-        "version":  version_utilisee,
-        "chevaux":  result,
+        "date":      date_str,
+        "reunion":   r_num,
+        "course":    c_num,
+        "version":   version_utilisee,
+        "chevaux":   result,
+        "confiance": confiance_course,   # 'faible' / 'moyen' / 'fort'
+        "plage":     plage_scores,       # écart max-min des scores bruts
     })
 
 
@@ -2001,7 +2027,7 @@ def _entrainer_v7():
     global _calibrator_v9
     global _duo_momentum_snap, _top3_3courses_snap, _top3_60j_snap
     global _fraicheur_snap, _progression_snap, _aptitude_snap
-    global _niveau_snap
+    global _niveau_snap, _confiance_seuils
     global _fallback_rk_v9, _duo_fiable_seuil_v9
     global _driver_stats, _entr_stats, _duo_stats, _spec_dist
     global _prior_pmu, _k_bayes_pmu
@@ -2042,6 +2068,13 @@ def _entrainer_v7():
 
         # Snapshots V12
         _niveau_snap = bundle.get('niveau_snap')
+
+        # Seuils indice de confiance (V15)
+        if bundle.get('confiance_seuils'):
+            _confiance_seuils = bundle['confiance_seuils']
+            print(f"  ✅ Seuils confiance : "
+                  f"faible<{_confiance_seuils['faible']} · "
+                  f"fort>{_confiance_seuils['fort']}")
 
         # Stats
         if bundle.get('driver_stats') is not None:
