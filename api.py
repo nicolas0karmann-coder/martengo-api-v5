@@ -2516,7 +2516,52 @@ def _charger_jockey_stats_galop():
 # ============================================================
 # CHARGEMENT MODÈLES GALOP
 # ============================================================
-PLAT_SNAPSHOTS_PATH  = "plat_snapshots.json.gz"
+PLAT_SNAPSHOTS_PATH   = "plat_snapshots.json.gz"
+ATTELE_SNAPSHOTS_PATH = "attele_snapshots.json.gz"
+
+def _charger_snapshots_attele():
+    """
+    Charge les snapshots attelé depuis attele_snapshots.json.gz.
+    Écrase les snapshots figés du pkl V15 avec des données à jour.
+    À regénérer lors de chaque réentraînement (toutes les 2 semaines).
+    """
+    global _driver_stats, _entr_stats, _duo_stats
+    global _duo_momentum_snap, _top3_3courses_snap, _top3_60j_snap
+    global _niveau_snap
+
+    if not os.path.exists(ATTELE_SNAPSHOTS_PATH):
+        print(f"⚠️  {ATTELE_SNAPSHOTS_PATH} introuvable — snapshots attelé depuis pkl uniquement")
+        return
+
+    try:
+        import gzip, json
+        print(f"📊 Chargement snapshots attelé depuis {ATTELE_SNAPSHOTS_PATH}…")
+        with gzip.open(ATTELE_SNAPSHOTS_PATH, 'rt', encoding='utf-8') as f:
+            snaps = json.load(f)
+
+        def to_df(key):
+            data = snaps.get(key, [])
+            return pd.DataFrame(data) if data else None
+
+        _driver_stats         = to_df('driver_stats')
+        _duo_stats            = to_df('duo_stats')
+        _entr_stats           = to_df('entr_stats')
+        _duo_momentum_snap    = to_df('duo_momentum_snap')
+        _top3_3courses_snap   = to_df('top3_3courses_snap')
+        _top3_60j_snap        = to_df('top3_60j_snap')
+        _niveau_snap          = to_df('niveau_snap')
+
+        date_ref = snaps.get('_date_ref', '?')
+        n_drv    = len(_driver_stats)   if _driver_stats   is not None else 0
+        n_entr   = len(_entr_stats)     if _entr_stats     is not None else 0
+        n_chx    = len(_top3_3courses_snap) if _top3_3courses_snap is not None else 0
+        print(f"✅ Snapshots attelé chargés depuis JSON (date_ref={date_ref})")
+        print(f"   {n_drv} drivers · {n_entr} entraîneurs · {n_chx} chevaux")
+
+    except Exception as e:
+        print(f"❌ Erreur chargement snapshots attelé : {e}")
+        import traceback; traceback.print_exc()
+
 
 def _charger_stats_plat():
     """
@@ -2623,8 +2668,9 @@ def _charger_modeles_galop():
 _charger_modele_pmu()
 initialiser()
 _entrainer_v7()
-_charger_modeles_galop()      # charge les snapshots pkl en premier
-_charger_stats_plat()         # écrase avec les stats live depuis l'historique
+_charger_modeles_galop()       # charge les snapshots pkl en premier
+_charger_snapshots_attele()    # écrase avec snapshots attelé à jour
+_charger_stats_plat()          # écrase avec snapshots PLAT à jour
 _charger_jockey_stats_galop()
 
 if __name__ == '__main__':
