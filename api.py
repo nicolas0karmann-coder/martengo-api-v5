@@ -29,7 +29,7 @@ CORS(app)
 # Pour activer Postgres : ajoutez DATABASE_URL dans les variables d'env Render.
 # La table est créée automatiquement au démarrage.
 # ============================================================
-HISTORIQUE_PATH = "historique_notes.csv"
+HISTORIQUE_PATH      = "historique_notes.csv"
 CSV_PATH        = "historique_courses.csv"
 
 # ── Connexion PostgreSQL optionnelle ──────────────────────────
@@ -2516,6 +2516,58 @@ def _charger_jockey_stats_galop():
 # ============================================================
 # CHARGEMENT MODÈLES GALOP
 # ============================================================
+PLAT_SNAPSHOTS_PATH  = "plat_snapshots.json.gz"
+
+def _charger_stats_plat():
+    """
+    Charge les snapshots PLAT depuis plat_snapshots.json.gz (2.7 Mo).
+    Écrase les snapshots figés du pkl avec des données à jour.
+    À regénérer lors de chaque réentraînement.
+    """
+    global _plat_jockey_stats, _plat_duo_stats, _plat_entr_stats
+    global _plat_top3_3c_snap, _plat_top3_60j_snap, _plat_regularite_snap
+    global _plat_aptitude_terrain, _plat_apt_dist_snap
+    global _plat_aptitude_hippo_snap, _plat_jockey_hippo_stats
+    global _plat_niveau_lot_snap, _plat_niveau_snap
+
+    if not os.path.exists(PLAT_SNAPSHOTS_PATH):
+        print(f"⚠️  {PLAT_SNAPSHOTS_PATH} introuvable — snapshots PLAT depuis pkl uniquement")
+        return
+
+    try:
+        import gzip, json
+        print(f"📊 Chargement snapshots PLAT depuis {PLAT_SNAPSHOTS_PATH}…")
+        with gzip.open(PLAT_SNAPSHOTS_PATH, 'rt', encoding='utf-8') as f:
+            snaps = json.load(f)
+
+        def to_df(key):
+            data = snaps.get(key, [])
+            return pd.DataFrame(data) if data else None
+
+        _plat_jockey_stats        = to_df('jockey_stats')
+        _plat_jockey_hippo_stats  = to_df('jockey_hippo_stats')
+        _plat_duo_stats           = to_df('duo_stats')
+        _plat_entr_stats          = to_df('entr_stats')
+        _plat_top3_3c_snap        = to_df('top3_3courses_snap')
+        _plat_top3_60j_snap       = to_df('top3_60j_snap')
+        _plat_regularite_snap     = to_df('regularite_snap')
+        _plat_apt_dist_snap       = to_df('apt_dist_snap')
+        _plat_aptitude_hippo_snap = to_df('aptitude_hippo_snap')
+        _plat_niveau_lot_snap     = to_df('niveau_lot_snap')
+        _plat_niveau_snap         = to_df('niveau_snap')
+
+        n_jky  = len(_plat_jockey_stats)  if _plat_jockey_stats  is not None else 0
+        n_entr = len(_plat_entr_stats)    if _plat_entr_stats    is not None else 0
+        n_chx  = len(_plat_top3_3c_snap)  if _plat_top3_3c_snap  is not None else 0
+        n_hip  = len(_plat_jockey_hippo_stats) if _plat_jockey_hippo_stats is not None else 0
+        print(f"✅ Snapshots PLAT chargés depuis JSON")
+        print(f"   {n_jky} jockeys · {n_entr} entraîneurs · {n_chx} chevaux · {n_hip} jockey×hippo")
+
+    except Exception as e:
+        print(f"❌ Erreur chargement snapshots PLAT : {e}")
+        import traceback; traceback.print_exc()
+
+
 def _charger_modeles_galop():
     """Charge les modèles XGBoost galop depuis les pkl."""
     global _models_galop
@@ -2552,11 +2604,13 @@ def _charger_modeles_galop():
                 _plat_regularite_snap   = bundle.get('regularite_snap')
                 _plat_niveau_lot_snap   = bundle.get('niveau_lot_snap')
                 _plat_niveau_snap       = bundle.get('niveau_snap')
-                _plat_jockey_hippo_stats  = bundle.get('jockey_hippo_stats')   # V4
-                _plat_aptitude_hippo_snap = bundle.get('aptitude_hippo_snap')  # V4
+                _plat_jockey_hippo_stats  = bundle.get('jockey_hippo_stats')
+                _plat_aptitude_hippo_snap = bundle.get('aptitude_hippo_snap')
                 if bundle.get('confiance_seuils'):
                     _plat_confiance_seuils = bundle['confiance_seuils']
-                print(f"  ✅ Snapshots PLAT V4 chargés")
+                # Note : ces snapshots seront écrasés par _charger_stats_plat()
+                # si historique_galop_plat_enrichi.csv est disponible
+                print(f"  ✅ Snapshots PLAT V4 chargés (seront mis à jour si historique disponible)")
 
         except Exception as e:
             print(f"❌ Erreur chargement {path} : {e}")
@@ -2569,7 +2623,8 @@ def _charger_modeles_galop():
 _charger_modele_pmu()
 initialiser()
 _entrainer_v7()
-_charger_modeles_galop()
+_charger_modeles_galop()      # charge les snapshots pkl en premier
+_charger_stats_plat()         # écrase avec les stats live depuis l'historique
 _charger_jockey_stats_galop()
 
 if __name__ == '__main__':
