@@ -410,7 +410,7 @@ _hist_snapshot       = None
 _seuils_notes        = None
 
 PMU_MODEL_PATH      = "model_pmu_v5.pkl"
-PMU_V7_PATH         = "model_pmu_v10_attele.pkl"   # XGBoost trot attelé V10
+PMU_V7_PATH         = "model_pmu_v12_attele.pkl"   # XGBoost trot attelé V12 ranking
 
 # Modèles galop
 GALOP_MODEL_PATHS = {
@@ -435,6 +435,8 @@ _top3_60j_snap         = None
 _fraicheur_snap        = None   # fraicheur_jours par cheval
 _progression_snap      = None   # progression_norm par cheval
 _aptitude_snap         = None   # aptitude_piste par cheval/tranche
+# Snapshots V12 — nouvelles features ranking
+_niveau_snap           = None   # niveau_habituel par cheval
 _fallback_rk_v9        = {'court': 76000, 'moyen': 75100,
                            'long': 76000, 'tres_long': 76500}
 _duo_fiable_seuil_v9   = 5
@@ -1425,6 +1427,68 @@ def notes_pmu():
         df_nc['aptitude_piste'] = prior_v9
     df_nc['aptitude_piste'] = df_nc['aptitude_piste'].fillna(prior_v9)
 
+    # ════════════════════════════════════════════════════════════
+    # FEATURES V12 — chrono_norm_peloton, ratio_niveau,
+    #                driver_win_rate_90j, entr_win_rate_30j
+    # ════════════════════════════════════════════════════════════
+
+    # ── chrono_norm_peloton — RK normalisé dans le peloton ────
+    # Feature RELATIVE : calculée sur le peloton courant
+    # RK bas = rapide = bon → inverser pour que 1.0 = meilleur
+    rk_vals = df_nc['reduction_km_corr'].copy()
+    # Remplacer les valeurs manquantes par la médiane du peloton
+    rk_med  = rk_vals[(rk_vals > 0) & (rk_vals < 100000)].median()
+    if pd.isna(rk_med):
+        rk_med = 76100
+    rk_vals = rk_vals.where((rk_vals > 0) & (rk_vals < 100000), rk_med)
+    rk_min, rk_max = rk_vals.min(), rk_vals.max()
+    if rk_max - rk_min > 1:
+        df_nc['chrono_norm_peloton'] = (1 - (rk_vals - rk_min) / (rk_max - rk_min)).clip(0, 1)
+    else:
+        df_nc['chrono_norm_peloton'] = 0.5
+
+    # ── ratio_niveau et descente_niveau ──────────────────────
+    try:
+        if _niveau_snap is not None:
+            snap_n = _niveau_snap.copy().reset_index(drop=True)
+            if 'nom' in snap_n.columns and 'niveau_habituel' in snap_n.columns:
+                df_nc = df_nc.merge(snap_n[['nom','niveau_habituel']],
+                                    on='nom', how='left')
+    except Exception as e:
+        print(f"⚠️  niveau_snap merge échoué ({e})")
+    if 'niveau_habituel' not in df_nc.columns:
+        df_nc['niveau_habituel'] = df_nc['montant_prix']
+    df_nc['niveau_habituel'] = df_nc['niveau_habituel'].fillna(df_nc['montant_prix'])
+    df_nc['ratio_niveau']    = (df_nc['montant_prix'] /
+                                 (df_nc['niveau_habituel'] + 1)).clip(0, 5)
+    df_nc['descente_niveau'] = (df_nc['ratio_niveau'] < 0.8).astype(float)
+
+    # ── driver_win_rate_90j ───────────────────────────────────
+    if _driver_stats is not None and 'driver_win_rate_90j' in _driver_stats.columns:
+        try:
+            df_nc = df_nc.merge(
+                _driver_stats[['driver','driver_win_rate_90j']],
+                on='driver', how='left')
+        except Exception as e:
+            print(f"⚠️  driver_win_rate_90j merge échoué ({e})")
+    if 'driver_win_rate_90j' not in df_nc.columns:
+        df_nc['driver_win_rate_90j'] = _prior_pmu * 10 / 11 if _prior_pmu else 0.28
+    df_nc['driver_win_rate_90j'] = df_nc['driver_win_rate_90j'].fillna(
+        _prior_pmu * 10 / 11 if _prior_pmu else 0.28)
+
+    # ── entr_win_rate_30j ─────────────────────────────────────
+    if _entr_stats is not None and 'entr_win_rate_30j' in _entr_stats.columns:
+        try:
+            df_nc = df_nc.merge(
+                _entr_stats[['entraineur','entr_win_rate_30j']],
+                on='entraineur', how='left')
+        except Exception as e:
+            print(f"⚠️  entr_win_rate_30j merge échoué ({e})")
+    if 'entr_win_rate_30j' not in df_nc.columns:
+        df_nc['entr_win_rate_30j'] = _prior_pmu * 10 / 11 if _prior_pmu else 0.28
+    df_nc['entr_win_rate_30j'] = df_nc['entr_win_rate_30j'].fillna(
+        _prior_pmu * 10 / 11 if _prior_pmu else 0.28)
+
     # ── reduction_km_v2 (fallback corrigé par tranche) ────────
     def _get_rk_v2(row):
         rk = row.get('reduction_km_corr', 0)
@@ -1555,74 +1619,70 @@ def notes_pmu():
     # ════════════════════════════════════════════════════════════
     # SCORING FINAL
     #
-    # Les 6 scores (FORME, DUO, PALMARES, GAINS, ADEQUATION, COTE)
-    # sont déjà calculés ci-dessus depuis les données PMU en temps réel.
-    #
     # Priorité :
-    #   1. XGBoost V8  → entraîné sur les 6 vrais scores (reconstruct_and_train_v8.py)
-    #   2. Fallback V6 → somme pondérée fixe (si V8 non disponible)
+    #   1. XGBoost V12 Ranking → predict() retourne des scores
+    #      calibrés en probas par IsotonicRegression
+    #   2. XGBoost Classification (V9-V11) → predict_proba()
+    #   3. Fallback V6 → somme pondérée fixe
     # ════════════════════════════════════════════════════════════
 
     SCORES_6 = ['score_forme', 'score_duo', 'score_historique',
                 'score_gains', 'score_adequation', 'score_cote']
     POIDS_V6 = [0.21, 0.17, 0.14, 0.08, 0.26, 0.11]
 
-    # Somme pondérée V6 (toujours calculée — sert de fallback)
+    # Somme pondérée V6 (fallback)
     score_metier = sum(df_nc[s] * p for s, p in zip(SCORES_6, POIDS_V6))
     df_nc['score_metier'] = score_metier
 
     if _use_v7 and _model_v7 is not None:
         try:
-            # Utiliser les features telles qu'enregistrées dans le pkl
-            # (SCORES_6 pour V8, autres features pour V7.x antérieurs)
             features_modele = _bundle_v7.get('features', SCORES_6)
+            model_type      = _bundle_v7.get('model_type', 'classification')
 
-            # Construire le DataFrame d'input — toutes les features
-            # doivent être disponibles dans df_nc (calculées ci-dessus)
             df_input = pd.DataFrame(index=df_nc.index)
             for feat in features_modele:
                 if feat in df_nc.columns:
                     df_input[feat] = df_nc[feat]
                 else:
-                    # Feature inconnue → valeur neutre
                     print(f"⚠️  Feature '{feat}' absente — remplacée par 0.5")
                     df_input[feat] = 0.5
 
-            probas = _model_v7.predict_proba(df_input[features_modele])[:, 1]
-
-            # Combinaison hybride : XGBoost + poids fixe score_cote
-            poids_cote = _bundle_v7.get('poids_cote_fixe', 0.0)
-            poids_xgb  = _bundle_v7.get('poids_xgb', 1.0)
-            if poids_cote > 0:
-                score_brut = pd.Series(
-                    poids_xgb * probas + poids_cote * df_nc['score_cote'].values,
-                    index=df_nc.index
-                )
+            if model_type == 'ranking':
+                # XGBRanker.predict() retourne des scores (pas des probas)
+                scores_bruts = _model_v7.predict(df_input[features_modele])
+                score_brut   = pd.Series(scores_bruts, index=df_nc.index)
             else:
-                score_brut = pd.Series(probas, index=df_nc.index)
+                # XGBClassifier.predict_proba()
+                probas     = _model_v7.predict_proba(df_input[features_modele])[:, 1]
+                poids_cote = _bundle_v7.get('poids_cote_fixe', 0.0)
+                poids_xgb  = _bundle_v7.get('poids_xgb', 1.0)
+                if poids_cote > 0:
+                    score_brut = pd.Series(
+                        poids_xgb * probas + poids_cote * df_nc['score_cote'].values,
+                        index=df_nc.index)
+                else:
+                    score_brut = pd.Series(probas, index=df_nc.index)
 
-            # Appliquer le calibrateur isotonique si disponible
-            # → ramène les probas dans la vraie plage [0, 1]
+            # Calibrateur isotonique → scores → probas calibrées
             if _calibrator_v9 is not None:
                 try:
                     score_final = pd.Series(
                         _calibrator_v9.predict(score_brut.values),
-                        index=df_nc.index
-                    )
+                        index=df_nc.index)
                 except Exception as e_cal:
-                    print(f"⚠️  Calibrateur échoué ({e_cal}) — probas brutes utilisées")
+                    print(f"⚠️  Calibrateur échoué ({e_cal}) — scores bruts")
                     score_final = score_brut
             else:
                 score_final = score_brut
 
-            # Conversion en notes sur la plage calibrée
+            # Conversion en notes
             p_min = _bundle_v7.get('proba_min')
             p_max = _bundle_v7.get('proba_max')
             df_nc['note_pmu'] = _proba_to_note_v7(score_final,
                                                    proba_min_ref=p_min,
                                                    proba_max_ref=p_max)
 
-            version_utilisee = _bundle_v7.get('version', 'v9')
+            version_utilisee = _bundle_v7.get('version', 'v12')
 
         except Exception as e:
             print(f"⚠️  XGBoost predict_proba échoué ({e}) — fallback V6")
@@ -1795,12 +1855,13 @@ def _entrainer_v7():
     global _calibrator_v9
     global _duo_momentum_snap, _top3_3courses_snap, _top3_60j_snap
     global _fraicheur_snap, _progression_snap, _aptitude_snap
+    global _niveau_snap
     global _fallback_rk_v9, _duo_fiable_seuil_v9
     global _driver_stats, _entr_stats, _duo_stats, _spec_dist
     global _prior_pmu, _k_bayes_pmu
 
     if not os.path.exists(PMU_V7_PATH):
-        print(f"⚠️  {PMU_V7_PATH} introuvable — modèle attelé V10 désactivé")
+        print(f"⚠️  {PMU_V7_PATH} introuvable — modèle attelé V12 désactivé")
         _use_v7 = False
         return
 
@@ -1819,17 +1880,24 @@ def _entrainer_v7():
         else:
             print(f"  ⚠️  Pas de calibrateur dans le pkl")
 
+        # Type de modèle (ranking vs classification)
+        model_type = bundle.get('model_type', 'classification')
+        print(f"  ✅ Type modèle : {model_type}")
+
         # Snapshots V9
         _duo_momentum_snap  = bundle.get('duo_momentum_snap')
         _top3_3courses_snap = bundle.get('top3_3courses_snap')
         _top3_60j_snap      = bundle.get('top3_60j_snap')
 
-        # Snapshots V10 — nouvelles features
+        # Snapshots V10
         _fraicheur_snap   = bundle.get('fraicheur_snap')
         _progression_snap = bundle.get('progression_snap')
         _aptitude_snap    = bundle.get('aptitude_snap')
 
-        # Stats (priorité V10)
+        # Snapshots V12
+        _niveau_snap = bundle.get('niveau_snap')
+
+        # Stats
         if bundle.get('driver_stats') is not None:
             _driver_stats = bundle['driver_stats']
         if bundle.get('entr_stats') is not None:
