@@ -724,65 +724,73 @@ def _proba_to_note_api(proba_series):
     return pd.Series(proba_series).apply(_convert)
 
 
-def _proba_to_note_v7(proba_series, proba_min_ref=None, proba_max_ref=None):
+def _proba_to_note_v7(scores_series, proba_min_ref=None, proba_max_ref=None):
     """
-    Conversion V9 : normalisation relative au peloton avec écarts proportionnels.
+    Conversion score/proba → note sur 20.
 
-    Le modèle produit des probas saturées (toutes >0.98) à cause du
-    scale_pos_weight. On normalise donc sur le peloton courant,
-    mais en préservant les vrais écarts relatifs entre chevaux :
+    Fonctionne pour les deux types de modèles :
 
-    - Si deux chevaux ont proba 0.9893 vs 0.9872, l'écart est 0.0021
-      sur une plage de 0.0021 → notes 20 et 1 (course très serrée)
-    - Si un cheval domine (0.99 vs 0.97), l'écart proportionnel est grand
-      → notes bien espacées
+    ── Ranking (V12+) ──────────────────────────────────────
+    Les scores XGBRanker sont déjà des scores de ranking
+    calibrés sur le peloton. On normalise linéairement sur
+    la plage [min, max] du peloton courant.
+    → Les écarts proportionnels entre chevaux sont préservés.
+    → Le #1 a toujours 20, le dernier toujours 1 — VOULU
+      car le modèle a appris à ordonner les chevaux.
+    → Si cheval A=0.52 et B=0.51 (proches) → notes proches.
+    → Si A=0.52 et B=-0.30 (dominant) → grand écart de notes.
 
-    La clé : on étale les notes sur la plage [min, max] du PELOTON,
-    mais on applique une compression logarithmique pour éviter que
-    des écarts infimes donnent des notes trop espacées.
+    ── Classification (V9-V11) ─────────────────────────────
+    Les probas sont des valeurs absolues [0,1].
+    On normalise sur les bornes proba_min/proba_max du pkl
+    pour éviter la saturation à 20 quand les probas sont
+    toutes élevées.
     """
-    s = pd.Series(proba_series).reset_index(drop=True)
-    orig_index = proba_series.index if hasattr(proba_series, 'index') else s.index
+    s         = pd.Series(scores_series).reset_index(drop=True)
+    orig_idx  = scores_series.index if hasattr(scores_series, 'index') else s.index
 
     if len(s) == 1:
         notes = pd.Series([10], index=s.index)
-        notes.index = orig_index
+        notes.index = orig_idx
         return notes
 
-    p_min = s.min()
-    p_max = s.max()
-    plage = p_max - p_min
+    # ── Détection du type de modèle ──────────────────────
+    is_ranking = _bundle_v7.get('model_type', 'classification') == 'ranking'
 
-    # Si toutes les probas sont identiques → tout le monde à 10
-    if plage < 1e-9:
-        notes = pd.Series([10] * len(s), index=s.index)
-        notes.index = orig_index
-        return notes
+    if is_ranking:
+        # ── Ranking : normalisation sur le peloton courant ──
+        # Linéaire stricte — préserve les vrais écarts
+        s_min, s_max = s.min(), s.max()
+        plage = s_max - s_min
 
-    # Normalisation relative au peloton : 0 (pire) → 1 (meilleur)
-    norm = (s - p_min) / plage
+        if plage < 1e-6:
+            notes = pd.Series([10] * len(s), index=s.index)
+            notes.index = orig_idx
+            return notes
 
-    # Compression : si l'écart absolu entre le meilleur et le pire
-    # est très faible (<1%), les notes restent groupées autour de 10
-    # Si l'écart est large (>10%), les notes s'étalent de 1 à 20
-    ecart_relatif = plage / (p_max + 1e-9)
+        notes_float = (s - s_min) / plage * 19 + 1
 
-    if ecart_relatif < 0.005:
-        # Course très serrée : notes groupées autour de 10 (±2)
-        notes_float = norm * 4 + 8   # plage 8→12
-    elif ecart_relatif < 0.02:
-        # Course modérément serrée : notes groupées (±4)
-        notes_float = norm * 8 + 6   # plage 6→14
-    elif ecart_relatif < 0.05:
-        # Course avec un peu d'écart : notes semi-étalées
-        notes_float = norm * 12 + 4  # plage 4→16
     else:
-        # Course avec un vrai favori dominant : notes bien étalées
-        notes_float = norm * 19 + 1  # plage 1→20
+        # ── Classification : normalisation sur bornes du pkl ──
+        # Utilise proba_min/proba_max pour éviter la saturation
+        p_min = proba_min_ref if proba_min_ref is not None \
+                else _bundle_v7.get('proba_min', s.min())
+        p_max = proba_max_ref if proba_max_ref is not None \
+                else _bundle_v7.get('proba_max', s.max())
+        plage = p_max - p_min
+
+        if plage < 1e-6:
+            notes = pd.Series([10] * len(s), index=s.index)
+            notes.index = orig_idx
+            return notes
+
+        notes_float = (s - p_min) / plage * 19 + 1
 
     notes = notes_float.round().clip(1, 20).astype(int)
-    notes.index = orig_index
+    notes.index = orig_idx
     return notes
+
+
 
 
 
