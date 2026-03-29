@@ -1313,7 +1313,7 @@ def notes_pmu():
     # ── duo_momentum_3 ────────────────────────────────────────
     try:
         if _duo_momentum_snap is not None:
-            snap = _duo_momentum_snap.copy().reset_index()
+            snap = _duo_momentum_snap.copy().reset_index(drop=True)
             # Normaliser les colonnes selon le format du groupby
             if 'duo_momentum_3' not in snap.columns:
                 # Format groupby multi-index : (nom, driver) → valeur
@@ -1331,7 +1331,7 @@ def notes_pmu():
     # ── top3_3courses ─────────────────────────────────────────
     try:
         if _top3_3courses_snap is not None:
-            snap3 = _top3_3courses_snap.copy().reset_index()
+            snap3 = _top3_3courses_snap.copy().reset_index(drop=True)
             if 'top3_3courses' not in snap3.columns:
                 snap3 = snap3.rename(columns={snap3.columns[-1]: 'top3_3courses'})
             if 'nom' in snap3.columns and 'top3_3courses' in snap3.columns:
@@ -1347,15 +1347,17 @@ def notes_pmu():
     # ── top3_60j ──────────────────────────────────────────────
     try:
         if _top3_60j_snap is not None:
-            snap60 = _top3_60j_snap.copy().reset_index()
+            snap60 = _top3_60j_snap.copy().reset_index(drop=True)
+            # Identifier la colonne top3_60j (peut avoir des colonnes extra)
             col_60j = next((c for c in snap60.columns
                             if 'top3_60j' in c or '60j' in c), None)
             if col_60j and col_60j != 'top3_60j':
                 snap60 = snap60.rename(columns={col_60j: 'top3_60j'})
-            if 'nom' in snap60.columns and 'top3_60j' in snap60.columns:
-                df_nc = df_nc.merge(
-                    snap60[['nom', 'top3_60j']],
-                    on='nom', how='left')
+            # Garder uniquement nom + top3_60j pour éviter les conflits
+            cols_ok = [c for c in ['nom', 'top3_60j'] if c in snap60.columns]
+            if len(cols_ok) == 2:
+                snap60 = snap60[cols_ok].drop_duplicates(subset=['nom'])
+                df_nc = df_nc.merge(snap60, on='nom', how='left')
     except Exception as e:
         print(f"⚠️  top3_60j_snap merge échoué ({e}) — fallback")
     if 'top3_60j' not in df_nc.columns:
