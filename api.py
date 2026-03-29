@@ -1789,14 +1789,16 @@ def notes_pmu():
 
                 # ── Score value (point 4) ──────────────────────
                 # Détecte les outsiders sous-estimés par le marché
-                # score_value = note_pmu / log(cote)
-                # Valeur élevée = cheval bien noté avec grande cote
+                # score_value = note_pmu * log(cote)
+                # Valeur élevée = bonne note ET grande cote
+                # Favori cote 1.5 note 18 → 18 * log(1.5) = 7.3  (faible value)
+                # Outsider cote 25 note 14 → 14 * log(25) = 45.4 (forte value)
                 if '_cote_app' in df_nc.columns:
                     cote_val = df_nc['_cote_app'].fillna(10.0)
                     cote_val = cote_val.clip(1.1, 200)
                     df_nc['score_value'] = (
-                        df_nc['note_pmu'] / np.log(cote_val)
-                    ).round(2)
+                        df_nc['note_pmu'] * np.log(cote_val)
+                    ).round(1)
                 else:
                     df_nc['score_value'] = 0.0
 
