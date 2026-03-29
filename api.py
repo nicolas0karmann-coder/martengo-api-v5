@@ -1184,6 +1184,11 @@ def notes_pmu():
 
     df_nc = pd.DataFrame(rows)
 
+    # Features de base toujours nécessaires
+    df_nc['nb_partants_c'] = len(df_nc)
+    df_nc['sexe']          = df_nc['condition_sexe'] if 'condition_sexe' in df_nc.columns else 2
+    df_nc['log_montant_prix'] = np.log1p(df_nc['montant_prix'])
+
     # ════════════════════════════════════════════════════════════
     # ROUTING GALOP — si discipline galop, pipeline dédié
     # ════════════════════════════════════════════════════════════
