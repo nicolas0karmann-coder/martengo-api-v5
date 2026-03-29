@@ -414,7 +414,7 @@ PMU_V7_PATH         = "model_pmu_v15_attele.pkl"   # XGBoost trot attelé V15 ra
 
 # Modèles galop
 GALOP_MODEL_PATHS = {
-    'PLAT':  "model_pmu_plat_v1.pkl",   # XGBoost Ranking PLAT V1
+    'PLAT':  "model_pmu_plat_v2.pkl",   # XGBoost Ranking PLAT V2
     'HAIE':  "model_pmu_haie.pkl",
     'MONTE': "model_pmu_monte.pkl",
 }
@@ -453,9 +453,12 @@ _plat_entr_stats          = None  # entr_win_rate_bayes + 30j
 _plat_top3_3c_snap        = None  # top3_3courses par cheval
 _plat_top3_60j_snap       = None  # top3_60j par cheval
 _plat_aptitude_terrain    = None  # aptitude par terrain_cat
-_plat_aptitude_distance   = None  # aptitude par tranche_distance
+_plat_aptitude_distance   = None  # aptitude par tranche_distance (V1)
+_plat_apt_dist_snap       = None  # apt_dist_recente par cheval/tranche (V2)
+_plat_regularite_snap     = None  # regularite_top3 par cheval (V2)
+_plat_niveau_lot_snap     = None  # niveau_lot_recent par cheval (V2)
 _plat_niveau_snap         = None  # niveau_habituel par cheval
-_plat_confiance_seuils    = {'faible': 0.347, 'moyen': 0.54, 'fort': 0.845}
+_plat_confiance_seuils    = {'faible': 0.26, 'moyen': 0.41, 'fort': 0.65}
 
 DISC_MUSIQUE_MAP = {'a': 0, 'm': 1, 'p': 2, 'h': 3, 's': 4, 'c': 5}
 DISCIPLINE_MAP   = {'TROT_ATTELE': 0, 'TROT_MONTE': 1, 'PLAT': 2, 'OBSTACLE': 3}
@@ -955,6 +958,20 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     if 'top3_60j' not in df_nc.columns: df_nc['top3_60j'] = prior
     df_nc['top3_60j'] = df_nc['top3_60j'].fillna(prior)
 
+    # ── Aptitude distance RÉCENTE (V2) ───────────────────────
+    if _plat_apt_dist_snap is not None:
+        try:
+            snap = _plat_apt_dist_snap.copy().reset_index(drop=True)
+            if 'apt_dist_recente' in snap.columns:
+                df_nc = df_nc.merge(
+                    snap[['nom','tranche_distance','apt_dist_recente']],
+                    on=['nom','tranche_distance'], how='left')
+        except Exception:
+            pass
+    if 'apt_dist_recente' not in df_nc.columns:
+        df_nc['apt_dist_recente'] = prior
+    df_nc['apt_dist_recente'] = df_nc['apt_dist_recente'].fillna(prior)
+
     # ── Aptitude terrain ─────────────────────────────────────
     if _plat_aptitude_terrain is not None:
         try:
@@ -994,6 +1011,35 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     df_nc['ratio_niveau']     = (df_nc['montant_prix'] /
                                   (df_nc['niveau_habituel'] + 1)).clip(0, 5)
     df_nc['descente_niveau']  = (df_nc['ratio_niveau'] < 0.8).astype(float)
+
+    # ── Régularité top3 (V2) ─────────────────────────────────
+    if _plat_regularite_snap is not None:
+        try:
+            snap = _plat_regularite_snap.copy().reset_index(drop=True)
+            if 'regularite_top3' in snap.columns and 'nom' in snap.columns:
+                df_nc = df_nc.merge(snap[['nom','regularite_top3']],
+                                    on='nom', how='left')
+        except Exception:
+            pass
+    if 'regularite_top3' not in df_nc.columns:
+        df_nc['regularite_top3'] = 0.0
+    df_nc['regularite_top3'] = df_nc['regularite_top3'].fillna(0.0)
+
+    # ── Niveau lot récent (V2) ────────────────────────────────
+    if _plat_niveau_lot_snap is not None:
+        try:
+            snap = _plat_niveau_lot_snap.copy().reset_index(drop=True)
+            if 'niveau_lot_recent' in snap.columns and 'nom' in snap.columns:
+                df_nc = df_nc.merge(snap[['nom','niveau_lot_recent']],
+                                    on='nom', how='left')
+        except Exception:
+            pass
+    if 'niveau_lot_recent' not in df_nc.columns:
+        df_nc['niveau_lot_recent'] = df_nc['montant_prix']
+    df_nc['niveau_lot_recent'] = df_nc['niveau_lot_recent'].fillna(df_nc['montant_prix'])
+    df_nc['ratio_niveau_lot']  = (df_nc['montant_prix'] /
+                                   (df_nc['niveau_lot_recent'] + 1)).clip(0, 5)
+    df_nc['descente_lot']      = (df_nc['ratio_niveau_lot'] < 0.8).astype(float)
 
     # ── Prédiction ranking ────────────────────────────────────
     df_input = pd.DataFrame(index=df_nc.index)
@@ -1081,7 +1127,7 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
         "reunion":   r_num,
         "course":    c_num,
         "discipline":"PLAT",
-        "version":   bundle.get('version', 'plat_v1_ranking'),
+        "version":   bundle.get('version', 'plat_v2_ranking'),
         "chevaux":   result,
         "confiance": confiance_course,
         "plage":     round(plage_scores, 3),
@@ -2441,6 +2487,7 @@ def _charger_modeles_galop():
     global _plat_jockey_stats, _plat_duo_stats, _plat_entr_stats
     global _plat_top3_3c_snap, _plat_top3_60j_snap
     global _plat_aptitude_terrain, _plat_aptitude_distance
+    global _plat_apt_dist_snap, _plat_regularite_snap, _plat_niveau_lot_snap
     global _plat_niveau_snap, _plat_confiance_seuils
 
     for disc, path in GALOP_MODEL_PATHS.items():
@@ -2465,10 +2512,13 @@ def _charger_modeles_galop():
                 _plat_top3_60j_snap     = bundle.get('top3_60j_snap')
                 _plat_aptitude_terrain  = bundle.get('aptitude_terrain_snap')
                 _plat_aptitude_distance = bundle.get('aptitude_distance_snap')
+                _plat_apt_dist_snap     = bundle.get('apt_dist_snap')
+                _plat_regularite_snap   = bundle.get('regularite_snap')
+                _plat_niveau_lot_snap   = bundle.get('niveau_lot_snap')
                 _plat_niveau_snap       = bundle.get('niveau_snap')
                 if bundle.get('confiance_seuils'):
                     _plat_confiance_seuils = bundle['confiance_seuils']
-                print(f"  ✅ Snapshots PLAT V1 chargés")
+                print(f"  ✅ Snapshots PLAT V2 chargés")
 
         except Exception as e:
             print(f"❌ Erreur chargement {path} : {e}")
