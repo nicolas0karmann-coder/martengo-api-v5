@@ -414,7 +414,7 @@ PMU_V7_PATH         = "model_pmu_v15_attele.pkl"   # XGBoost trot attelé V15 ra
 
 # Modèles galop
 GALOP_MODEL_PATHS = {
-    'PLAT':  "model_pmu_plat_v3.pkl",   # XGBoost Ranking PLAT V3 — sans cotes
+    'PLAT':  "model_pmu_plat_v4.pkl",   # XGBoost Ranking PLAT V4
     'HAIE':  "model_pmu_haie.pkl",
     'MONTE': "model_pmu_monte.pkl",
 }
@@ -447,18 +447,20 @@ _models_galop       = {}   # {'PLAT': bundle, 'HAIE': bundle, 'MONTE': bundle}
 _jockey_stats_galop = None # stats jockey pour PLAT et HAIE
 
 # Globals PLAT V1 Ranking — snapshots spécifiques
-_plat_jockey_stats        = None  # jockey_win_rate_bayes + 30j
-_plat_duo_stats           = None  # duo jockey × cheval
-_plat_entr_stats          = None  # entr_win_rate_bayes + 30j
-_plat_top3_3c_snap        = None  # top3_3courses par cheval
-_plat_top3_60j_snap       = None  # top3_60j par cheval
-_plat_aptitude_terrain    = None  # aptitude par terrain_cat
-_plat_aptitude_distance   = None  # aptitude par tranche_distance (V1)
-_plat_apt_dist_snap       = None  # apt_dist_recente par cheval/tranche (V2)
-_plat_regularite_snap     = None  # regularite_top3 par cheval (V2)
-_plat_niveau_lot_snap     = None  # niveau_lot_recent par cheval (V2)
-_plat_niveau_snap         = None  # niveau_habituel par cheval
-_plat_confiance_seuils    = {'faible': 0.26, 'moyen': 0.41, 'fort': 0.65}
+_plat_jockey_stats        = None
+_plat_duo_stats           = None
+_plat_entr_stats          = None
+_plat_top3_3c_snap        = None
+_plat_top3_60j_snap       = None
+_plat_aptitude_terrain    = None
+_plat_aptitude_distance   = None
+_plat_apt_dist_snap       = None
+_plat_regularite_snap     = None
+_plat_niveau_lot_snap     = None
+_plat_niveau_snap         = None
+_plat_jockey_hippo_stats  = None  # jockey_win_rate par hippodrome (V4)
+_plat_aptitude_hippo_snap = None  # aptitude cheval par hippodrome (V4)
+_plat_confiance_seuils    = {'faible': 0.418, 'moyen': 0.531, 'fort': 0.651}
 
 DISC_MUSIQUE_MAP = {'a': 0, 'm': 1, 'p': 2, 'h': 3, 's': 4, 'c': 5}
 DISCIPLINE_MAP   = {'TROT_ATTELE': 0, 'TROT_MONTE': 1, 'PLAT': 2, 'OBSTACLE': 3}
@@ -698,16 +700,19 @@ def _fetch_conditions(date_str, r_num, c_num):
                     except:
                         terrain_val = 3.0
                     terrain_label = penet.get('intitule', '') or ''
+                    hippo = reunion.get('hippodrome', {}) or {}
                     return {
-                        'distance':       course.get('distance', 0) or 0,
-                        'montant_prix':   course.get('montantPrix', 0) or 0,
-                        'discipline':     DISCIPLINE_MAP.get(course.get('discipline',''), 0),
-                        'discipline_raw': course.get('discipline', ''),
-                        'corde':          CORDE_MAP.get(course.get('corde',''), 0),
-                        'condition_sexe': SEXE_MAP.get(course.get('conditionSexe',''), 2),
-                        'nb_partants':    course.get('nombreDeclaresPartants', 0) or 0,
-                        'terrain_val':    terrain_val,
-                        'terrain_label':  terrain_label,
+                        'distance':        course.get('distance', 0) or 0,
+                        'montant_prix':    course.get('montantPrix', 0) or 0,
+                        'discipline':      DISCIPLINE_MAP.get(course.get('discipline',''), 0),
+                        'discipline_raw':  course.get('discipline', ''),
+                        'corde':           CORDE_MAP.get(course.get('corde',''), 0),
+                        'condition_sexe':  SEXE_MAP.get(course.get('conditionSexe',''), 2),
+                        'nb_partants':     course.get('nombreDeclaresPartants', 0) or 0,
+                        'terrain_val':     terrain_val,
+                        'terrain_label':   terrain_label,
+                        'hippodrome_code': hippo.get('codeHippodrome', '') or '',
+                        'hippodrome_nom':  hippo.get('libelleCourt', '') or '',
                     }
     return _cond_vides()
 
@@ -715,7 +720,8 @@ def _fetch_conditions(date_str, r_num, c_num):
 def _cond_vides():
     return {'distance': 0, 'montant_prix': 0, 'discipline': 0, 'discipline_raw': '',
             'corde': 0, 'condition_sexe': 2, 'nb_partants': 0,
-            'terrain_val': 3.0, 'terrain_label': ''}
+            'terrain_val': 3.0, 'terrain_label': '',
+            'hippodrome_code': '', 'hippodrome_nom': ''}
 
 
 # Seuils par défaut si bundle ne les contient pas (utilisé pour V6 fallback)
@@ -998,7 +1004,32 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     if 'aptitude_distance' not in df_nc.columns: df_nc['aptitude_distance'] = prior
     df_nc['aptitude_distance'] = df_nc['aptitude_distance'].fillna(prior)
 
-    # ── Niveau course ────────────────────────────────────────
+    # ── Aptitude hippodrome (V4) ─────────────────────────────
+    # Récupérer le code hippodrome depuis les données de la course
+    # Il est passé dans df_nc via le champ 'hippodrome_code' si disponible
+    if 'hippodrome_code' not in df_nc.columns:
+        df_nc['hippodrome_code'] = ''
+
+    if _plat_aptitude_hippo_snap is not None and 'hippodrome_code' in df_nc.columns:
+        try:
+            snap = _plat_aptitude_hippo_snap[['nom','hippodrome_code','aptitude_hippodrome']]
+            df_nc = df_nc.merge(snap, on=['nom','hippodrome_code'], how='left')
+        except Exception:
+            pass
+    if 'aptitude_hippodrome' not in df_nc.columns:
+        df_nc['aptitude_hippodrome'] = prior
+    df_nc['aptitude_hippodrome'] = df_nc['aptitude_hippodrome'].fillna(prior)
+
+    # ── Jockey win rate par hippodrome (V4) ──────────────────
+    if _plat_jockey_hippo_stats is not None and 'hippodrome_code' in df_nc.columns:
+        try:
+            snap = _plat_jockey_hippo_stats[['driver','hippodrome_code','jockey_win_rate_hippo']]
+            df_nc = df_nc.merge(snap, on=['driver','hippodrome_code'], how='left')
+        except Exception:
+            pass
+    if 'jockey_win_rate_hippo' not in df_nc.columns:
+        df_nc['jockey_win_rate_hippo'] = fallback
+    df_nc['jockey_win_rate_hippo'] = df_nc['jockey_win_rate_hippo'].fillna(fallback)
     if _plat_niveau_snap is not None:
         try:
             df_nc = df_nc.merge(
@@ -1127,7 +1158,7 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
         "reunion":   r_num,
         "course":    c_num,
         "discipline":"PLAT",
-        "version":   bundle.get('version', 'plat_v3_ranking'),
+        "version":   bundle.get('version', 'plat_v4_ranking'),
         "chevaux":   result,
         "confiance": confiance_course,
         "plage":     round(plage_scores, 3),
@@ -1510,6 +1541,8 @@ def notes_pmu():
             'place_corde':       float(p.get('placeCorde', 0) or 0),
             'terrain_label':     conditions.get('terrain_label', ''),
             'terrain_val':       float(conditions.get('terrain_val', 3.0)),
+            'hippodrome_code':   conditions.get('hippodrome_code', ''),
+            'hippodrome_nom':    conditions.get('hippodrome_nom', ''),
         }
         row['musique'] = musique_brute
         row.update(mus)
@@ -2488,7 +2521,8 @@ def _charger_modeles_galop():
     global _plat_top3_3c_snap, _plat_top3_60j_snap
     global _plat_aptitude_terrain, _plat_aptitude_distance
     global _plat_apt_dist_snap, _plat_regularite_snap, _plat_niveau_lot_snap
-    global _plat_niveau_snap, _plat_confiance_seuils
+    global _plat_niveau_snap, _plat_jockey_hippo_stats, _plat_aptitude_hippo_snap
+    global _plat_confiance_seuils
 
     for disc, path in GALOP_MODEL_PATHS.items():
         if not os.path.exists(path):
@@ -2516,9 +2550,11 @@ def _charger_modeles_galop():
                 _plat_regularite_snap   = bundle.get('regularite_snap')
                 _plat_niveau_lot_snap   = bundle.get('niveau_lot_snap')
                 _plat_niveau_snap       = bundle.get('niveau_snap')
+                _plat_jockey_hippo_stats  = bundle.get('jockey_hippo_stats')   # V4
+                _plat_aptitude_hippo_snap = bundle.get('aptitude_hippo_snap')  # V4
                 if bundle.get('confiance_seuils'):
                     _plat_confiance_seuils = bundle['confiance_seuils']
-                print(f"  ✅ Snapshots PLAT V2 chargés")
+                print(f"  ✅ Snapshots PLAT V4 chargés")
 
         except Exception as e:
             print(f"❌ Erreur chargement {path} : {e}")
