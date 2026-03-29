@@ -414,7 +414,7 @@ PMU_V7_PATH         = "model_pmu_v15_attele.pkl"   # XGBoost trot attelé V15 ra
 
 # Modèles galop
 GALOP_MODEL_PATHS = {
-    'PLAT':  "model_pmu_plat_v2.pkl",   # XGBoost Ranking PLAT V2
+    'PLAT':  "model_pmu_plat_v3.pkl",   # XGBoost Ranking PLAT V3 — sans cotes
     'HAIE':  "model_pmu_haie.pkl",
     'MONTE': "model_pmu_monte.pkl",
 }
@@ -1127,7 +1127,7 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
         "reunion":   r_num,
         "course":    c_num,
         "discipline":"PLAT",
-        "version":   bundle.get('version', 'plat_v2_ranking'),
+        "version":   bundle.get('version', 'plat_v3_ranking'),
         "chevaux":   result,
         "confiance": confiance_course,
         "plage":     round(plage_scores, 3),
