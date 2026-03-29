@@ -1117,14 +1117,15 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     else:
         df_nc['score_value'] = 0.0
 
-    # Scores métier pour l'affichage (compatibilité frontend)
-    df_nc['score_forme']     = df_nc['mus_score_pondere'].fillna(0) / 9
-    df_nc['score_duo']       = df_nc['jockey_win_rate_bayes'].fillna(prior)
-    df_nc['score_jockey']    = df_nc['jockey_win_rate_bayes'].fillna(prior)
-    df_nc['score_historique']= df_nc['top3_3courses'].fillna(prior)
-    df_nc['score_gains']     = df_nc['ratio_victoires'].fillna(0)
-    df_nc['score_handicap']  = df_nc['rang_handicap_norm'].fillna(0.5)
-    df_nc['score_cote']      = df_nc['rang_cote_peloton'].fillna(0.5)
+    # Scores métier — vraies dimensions V4 (pour affichage frontend)
+    # Normalisées sur [0, 100] pour les barres de progression
+    df_nc['score_forme']      = df_nc['mus_score_pondere'].fillna(0) / 9          # 0-9 → 0-100
+    df_nc['score_jockey']     = df_nc['rang_jockey_peloton'].fillna(0.5)          # 0-1 → affiché *100
+    df_nc['score_handicap']   = df_nc['rang_handicap_norm'].fillna(0.5)           # 0-1 → affiché *100
+    df_nc['score_historique'] = df_nc['top3_3courses'].fillna(prior)              # 0-1 → affiché *100
+    df_nc['score_gains']      = df_nc['ratio_victoires'].fillna(0).clip(0, 0.5) * 2  # 0-0.5 → 0-1
+    df_nc['score_niveau']     = (1 - df_nc['ratio_niveau_lot'].fillna(1).clip(0, 2) / 2)  # descente=1
+    df_nc['score_cote']       = 0.5  # non utilisé en V4 — cotes exclues
 
     # JSON
     result = []
@@ -1139,11 +1140,12 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
             "avis":      int(row['avis_entraineur']) if pd.notna(row.get('avis_entraineur')) else 0,
             "scores": {
                 "forme":      int(round(float(row['score_forme'])     * 100)),
-                "duo":        int(round(float(row['score_duo'])       * 100)),
+                "duo":        int(round(float(row['score_jockey'])    * 100)),
                 "jockey":     int(round(float(row['score_jockey'])    * 100)),
                 "historique": int(round(float(row['score_historique'])* 100)),
                 "gains":      int(round(float(row['score_gains'])     * 100)),
                 "handicap":   int(round(float(row['score_handicap'])  * 100)),
+                "niveau":     int(round(float(row['score_niveau'])    * 100)),
                 "cote":       int(round(float(row['score_cote'])      * 100)),
             },
             "taux_disq":       round(float(row['mus_taux_disq']) * 100, 1) if pd.notna(row.get('mus_taux_disq')) else 0,
