@@ -410,7 +410,7 @@ _hist_snapshot       = None
 _seuils_notes        = None
 
 PMU_MODEL_PATH      = "model_pmu_v5.pkl"
-PMU_V7_PATH         = "model_pmu_v12_attele.pkl"   # XGBoost trot attelé V12 ranking
+PMU_V7_PATH         = "model_pmu_v13_attele.pkl"   # XGBoost trot attelé V13 ranking
 
 # Modèles galop
 GALOP_MODEL_PATHS = {
@@ -1503,6 +1503,44 @@ def notes_pmu():
         df_nc['entr_win_rate_30j'] = _prior_pmu * 10 / 11 if _prior_pmu else 0.28
     df_nc['entr_win_rate_30j'] = df_nc['entr_win_rate_30j'].fillna(
         _prior_pmu * 10 / 11 if _prior_pmu else 0.28)
+
+    # ════════════════════════════════════════════════════════════
+    # FEATURES V13 — deferre_4, rk_course_norm, corde_avantage
+    # ════════════════════════════════════════════════════════════
+
+    # ── deferre_4 — déferré 4 membres ────────────────────────
+    # L'API PMU retourne p.get('deferre') avec des valeurs comme
+    # FERRE, DEFERRE_ANTERIEURS, DEFERRE_POSTERIEURS, DEFERRE_4_MEMBRES
+    # On l'encode déjà dans _ferrage_map_pmu au chargement
+    # deferre=3 dans l'historique = DEFERRE_4_MEMBRES
+    if 'deferre' in df_nc.columns:
+        df_nc['deferre_4'] = (df_nc['deferre'] == 3).astype(float)
+    else:
+        df_nc['deferre_4'] = 0.0
+
+    # ── rk_course_norm — chrono normalisé par tranche ─────────
+    # En production on n'a pas le chrono de la course (pas encore jouée)
+    # On utilise reduction_km_v2 normalisé dans le peloton
+    # (identique à chrono_norm_peloton — feature relative au peloton)
+    df_nc['rk_course_norm'] = df_nc['chrono_norm_peloton']
+
+    # ── corde_avantage — numéro de corde ─────────────────────
+    # place_corde est déjà dans df_nc depuis l'API PMU
+    def _avantage_corde(c):
+        try:
+            c = float(c)
+            if c <= 0:    return 0.5   # inconnu
+            elif c <= 2:  return 1.0
+            elif c <= 4:  return 0.8
+            elif c <= 7:  return 0.5
+            elif c <= 10: return 0.3
+            else:         return 0.1
+        except:
+            return 0.5
+    if 'place_corde' in df_nc.columns:
+        df_nc['corde_avantage'] = df_nc['place_corde'].apply(_avantage_corde)
+    else:
+        df_nc['corde_avantage'] = 0.5
 
     # ── reduction_km_v2 (fallback corrigé par tranche) ────────
     def _get_rk_v2(row):
