@@ -410,7 +410,7 @@ _hist_snapshot       = None
 _seuils_notes        = None
 
 PMU_MODEL_PATH      = "model_pmu_v5.pkl"
-PMU_V7_PATH         = "model_pmu_v13_attele.pkl"   # XGBoost trot attelé V13 ranking
+PMU_V7_PATH         = "model_pmu_v14_attele.pkl"   # XGBoost trot attelé V14 ranking
 
 # Modèles galop
 GALOP_MODEL_PATHS = {
@@ -1542,14 +1542,77 @@ def notes_pmu():
     else:
         df_nc['corde_avantage'] = 0.5
 
-    # ── reduction_km_v2 (fallback corrigé par tranche) ────────
-    def _get_rk_v2(row):
+    # ════════════════════════════════════════════════════════════
+    # FEATURES V14 — relatives au peloton (calculées en temps réel)
+    # Ces features capturent la hiérarchie dans CETTE course
+    # ════════════════════════════════════════════════════════════
+
+    # Nécessite reduction_km_v2 — calculé juste après
+    # On le calcule d'abord pour les features peloton
+    def _get_rk_v2_val(row):
         rk = row.get('reduction_km_corr', 0)
         if rk and rk > 0 and rk != 72600:
             return rk
         return _fallback_rk_v9.get(str(row.get('tranche_distance', 'long')), 76100)
-    df_nc['reduction_km_v2'] = df_nc.apply(_get_rk_v2, axis=1)
+    df_nc['reduction_km_v2'] = df_nc.apply(_get_rk_v2_val, axis=1)
     df_nc['reduction_km']    = df_nc['reduction_km_v2']
+
+    # ── rang_rk_peloton — rang chrono dans le peloton ────────
+    rk_vals  = df_nc['reduction_km_v2'].values.astype(float)
+    rk_clean = np.where((rk_vals > 0) & (rk_vals < 100000), rk_vals, np.nan)
+    rk_med   = float(np.nanmedian(rk_clean)) if np.any(~np.isnan(rk_clean)) else 76000
+    rk_fill  = np.where(np.isnan(rk_clean), rk_med, rk_clean)
+
+    n = len(df_nc)
+    # Rang ascendant : 1 = RK le plus bas = le plus rapide
+    rk_rank      = pd.Series(rk_fill).rank(ascending=True).values
+    rk_rank_norm = 1 - (rk_rank - 1) / max(n - 1, 1)  # 1.0 = meilleur
+    df_nc['rang_rk_peloton'] = rk_rank_norm
+
+    # ── ecart_meilleur_rk — écart au meilleur chrono ─────────
+    rk_min = float(np.nanmin(rk_clean)) if np.any(~np.isnan(rk_clean)) else rk_med
+    ecart  = rk_fill - rk_min
+    ecart_max = ecart.max()
+    if ecart_max > 0:
+        df_nc['ecart_meilleur_rk'] = 1 - (ecart / ecart_max)  # 1.0 = meilleur
+    else:
+        df_nc['ecart_meilleur_rk'] = 0.5
+
+    # ── ratio_gains_peloton — gains vs moyenne peloton ────────
+    gains     = df_nc['gains_carriere'].values.astype(float)
+    gains_moy = gains.mean()
+    if gains_moy > 0:
+        df_nc['ratio_gains_peloton'] = (gains / (gains_moy + 1)).clip(0, 5) / 5
+    else:
+        df_nc['ratio_gains_peloton'] = 0.5
+
+    # ── ratio_victoires_peloton — winrate vs médiane peloton ──
+    tv     = df_nc['ratio_victoires'].values.astype(float)
+    tv_med = float(np.median(tv))
+    tv_std = float(tv.std())
+    if tv_std > 1e-6:
+        df_nc['ratio_victoires_peloton'] = (
+            (tv - tv_med) / (tv_std * 2 + 1e-9)).clip(-1, 1) * 0.5 + 0.5
+    else:
+        df_nc['ratio_victoires_peloton'] = 0.5
+
+    # ── ratio_age_peloton — age relatif dans le peloton ──────
+    age     = df_nc['age'].values.astype(float)
+    age_med = float(np.median(age))
+    age_std = float(age.std())
+    if age_std > 1e-6:
+        df_nc['ratio_age_peloton'] = (
+            (age - age_med) / (age_std * 2 + 1e-9)).clip(-1, 1) * 0.5 + 0.5
+    else:
+        df_nc['ratio_age_peloton'] = 0.5
+
+    # ── rang_driver_peloton — rang driver par winrate ─────────
+    if 'driver_win_rate_bayes' in df_nc.columns:
+        drv_wr = df_nc['driver_win_rate_bayes'].values.astype(float)
+        d_rank = pd.Series(drv_wr).rank(ascending=False).values
+        df_nc['rang_driver_peloton'] = 1 - (d_rank - 1) / max(n - 1, 1)
+    else:
+        df_nc['rang_driver_peloton'] = 0.5
 
     # ════════════════════════════════════════════════════════════
     # ÉTAPE 1 — SCORES MÉTIER (0.0 → 1.0 chacun)
