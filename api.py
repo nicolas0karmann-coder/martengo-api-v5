@@ -1661,6 +1661,17 @@ def notes_pmu():
                 # XGBRanker.predict() retourne des scores (pas des probas)
                 scores_bruts = _model_v7.predict(df_input[features_modele])
                 score_brut   = pd.Series(scores_bruts, index=df_nc.index)
+                # Diagnostic : log des scores bruts
+                print(f"  [V12] Scores ranking : min={scores_bruts.min():.3f}"
+                      f" max={scores_bruts.max():.3f}"
+                      f" mean={scores_bruts.mean():.3f}"
+                      f" plage={scores_bruts.max()-scores_bruts.min():.3f}")
+                # Compter les features absentes (= 0.5 fallback)
+                n_fallback = sum(1 for feat in features_modele
+                                 if feat not in df_nc.columns)
+                if n_fallback > 0:
+                    print(f"  [V12] ⚠️  {n_fallback}/{len(features_modele)}"
+                          f" features en fallback 0.5")
             else:
                 # XGBClassifier.predict_proba()
                 probas     = _model_v7.predict_proba(df_input[features_modele])[:, 1]
