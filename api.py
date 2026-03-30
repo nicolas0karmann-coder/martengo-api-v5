@@ -415,7 +415,7 @@ PMU_V7_PATH         = "model_pmu_v15_attele.pkl"   # XGBoost trot attelé V15 ra
 # Modèles galop
 GALOP_MODEL_PATHS = {
     'PLAT':  "model_pmu_plat_v4.pkl",    # XGBoost Ranking PLAT V4
-    'HAIE':  "model_pmu_haie.pkl",
+    'HAIE':  "model_pmu_haie_v1.pkl",   # XGBoost Ranking HAIE V1
     'MONTE': "model_pmu_monte_v1.pkl",   # XGBoost Ranking MONTE V1
 }
 DISCIPLINES_TROT  = ('ATTELE', 'TROT_ATTELE')
@@ -473,6 +473,17 @@ _monte_apt_dist_snap    = None
 _monte_niveau_lot_snap  = None
 _monte_niveau_snap      = None
 _monte_confiance_seuils = {'faible': 0.3, 'moyen': 0.5, 'fort': 0.7}
+
+# Globals HAIE V1 Ranking
+_haie_jockey_stats    = None
+_haie_entr_stats      = None
+_haie_top3_3c_snap    = None
+_haie_top3_60j_snap   = None
+_haie_regularite_snap = None
+_haie_apt_dist_snap   = None
+_haie_niveau_lot_snap = None
+_haie_niveau_snap     = None
+_haie_confiance_seuils = {'faible': 0.3, 'moyen': 0.5, 'fort': 0.7}
 
 DISC_MUSIQUE_MAP = {'a': 0, 'm': 1, 'p': 2, 'h': 3, 's': 4, 'c': 5}
 DISCIPLINE_MAP   = {'TROT_ATTELE': 0, 'TROT_MONTE': 1, 'PLAT': 2, 'OBSTACLE': 3}
@@ -1193,6 +1204,12 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
     if discipline_raw == 'MONTE' and bundle_monte and \
        bundle_monte.get('model_type') == 'ranking':
         return _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num)
+
+    # ── HAIE V1 Ranking — pipeline dédié ─────────────────────
+    bundle_haie = _models_galop.get('HAIE')
+    if discipline_raw == 'HAIE' and bundle_haie and \
+       bundle_haie.get('model_type') == 'ranking':
+        return _notes_pmu_haie_v1(df_nc, date_str, r_num, c_num)
 
     prior    = 0.15
     k_bayes  = 10
@@ -2537,6 +2554,238 @@ def _charger_jockey_stats_galop():
 PLAT_SNAPSHOTS_PATH   = "plat_snapshots.json.gz"
 ATTELE_SNAPSHOTS_PATH = "attele_snapshots.json.gz"
 MONTE_SNAPSHOTS_PATH  = "monte_snapshots.json.gz"
+HAIE_SNAPSHOTS_PATH   = "haie_snapshots.json.gz"
+
+def _notes_pmu_haie_v1(df_nc, date_str, r_num, c_num):
+    """Pipeline inférence HAIE V1 — XGBoost Ranking."""
+    bundle   = _models_galop['HAIE']
+    model    = bundle['model']
+    feats    = bundle['features']
+    cal      = bundle.get('calibrator')
+    prior    = bundle.get('prior_win', 0.353)
+    k_bayes  = bundle.get('k_bayes', 10)
+    fallback = prior * k_bayes / (k_bayes + 1)
+    n        = len(df_nc)
+
+    # Features simples
+    df_nc['ratio_victoires']  = df_nc['nb_victoires']  / (df_nc['nb_courses'] + 1)
+    df_nc['ratio_places']     = df_nc['nb_places']      / (df_nc['nb_courses'] + 1)
+    df_nc['gains_par_course'] = df_nc['gains_carriere'] / (df_nc['nb_courses'] + 1)
+    df_nc['ratio_gains_rec']  = df_nc['gains_annee']    / (df_nc['gains_carriere'] + 1)
+    df_nc['nb_partants_c']    = n
+    df_nc['tranche_distance'] = pd.cut(df_nc['distance'],
+        bins=[0,3000,4000,9999],
+        labels=['court','moyen','long']).astype(str)
+
+    # Features peloton
+    gains = df_nc['gains_carriere'].values.astype(float)
+    gains_moy = gains.mean()
+    df_nc['ratio_gains_peloton'] = (
+        (gains/(gains_moy+1)).clip(0,5)/5 if gains_moy>0 else 0.5)
+
+    tv = df_nc['ratio_victoires'].values.astype(float)
+    tv_med = float(np.median(tv)); tv_std = float(tv.std())
+    df_nc['ratio_victoires_peloton'] = (
+        ((tv-tv_med)/(tv_std*2+1e-9)).clip(-1,1)*0.5+0.5 if tv_std>1e-6 else 0.5)
+
+    pw = df_nc['handicap_poids'].values.astype(float)
+    pw_std = float(pw.std())
+    df_nc['poids_relatif_peloton'] = (
+        (-(pw-pw.mean())/(pw_std+1e-9)).clip(-3,3)/3*0.5+0.5 if pw_std>1e-6 else 0.5)
+
+    hv = df_nc['handicap_valeur'].values.astype(float)
+    hv_rank = pd.Series(hv).rank(ascending=False).values
+    df_nc['rang_handicap_norm'] = 1-(hv_rank-1)/max(n-1,1)
+
+    # Jockey
+    if _haie_jockey_stats is not None:
+        try:
+            df_nc = df_nc.merge(
+                _haie_jockey_stats[['driver','jockey_win_rate_bayes',
+                                    'jockey_win_rate_30j','jockey_n']],
+                on='driver', how='left')
+        except Exception: pass
+    for col, val in [('jockey_win_rate_bayes',fallback),
+                     ('jockey_win_rate_30j',fallback),('jockey_n',0)]:
+        if col not in df_nc.columns: df_nc[col] = val
+        df_nc[col] = df_nc[col].fillna(val)
+
+    jwr = df_nc['jockey_win_rate_bayes'].values.astype(float)
+    j_rank = pd.Series(jwr).rank(ascending=False).values
+    df_nc['rang_jockey_peloton'] = 1-(j_rank-1)/max(n-1,1)
+
+    # Entraîneur
+    if _haie_entr_stats is not None:
+        try:
+            df_nc = df_nc.merge(
+                _haie_entr_stats[['entraineur','entr_win_rate_bayes','entr_win_rate_30j']],
+                on='entraineur', how='left')
+        except Exception: pass
+    for col, val in [('entr_win_rate_bayes',fallback),('entr_win_rate_30j',fallback)]:
+        if col not in df_nc.columns: df_nc[col] = val
+        df_nc[col] = df_nc[col].fillna(val)
+
+    # Forme récente
+    for snap, col, default in [
+        (_haie_top3_3c_snap,'top3_3courses',prior),
+        (_haie_top3_60j_snap,'top3_60j',prior),
+        (_haie_regularite_snap,'regularite_top3',0.0),
+    ]:
+        if snap is not None and col in snap.columns:
+            try: df_nc = df_nc.merge(snap[['nom',col]], on='nom', how='left')
+            except Exception: pass
+        if col not in df_nc.columns: df_nc[col] = default
+        df_nc[col] = df_nc[col].fillna(default)
+
+    # Aptitude distance
+    if _haie_apt_dist_snap is not None:
+        try:
+            df_nc = df_nc.merge(
+                _haie_apt_dist_snap[['nom','tranche_distance','apt_dist_recente']],
+                on=['nom','tranche_distance'], how='left')
+        except Exception: pass
+    if 'apt_dist_recente' not in df_nc.columns: df_nc['apt_dist_recente'] = prior
+    df_nc['apt_dist_recente'] = df_nc['apt_dist_recente'].fillna(prior)
+
+    # Niveau lot
+    if _haie_niveau_lot_snap is not None:
+        try:
+            df_nc = df_nc.merge(
+                _haie_niveau_lot_snap[['nom','niveau_lot_recent']], on='nom', how='left')
+        except Exception: pass
+    if 'niveau_lot_recent' not in df_nc.columns:
+        df_nc['niveau_lot_recent'] = df_nc['montant_prix']
+    df_nc['niveau_lot_recent'] = df_nc['niveau_lot_recent'].fillna(df_nc['montant_prix'])
+    df_nc['ratio_niveau_lot'] = (df_nc['montant_prix']/(df_nc['niveau_lot_recent']+1)).clip(0,5)
+    df_nc['descente_lot']     = (df_nc['ratio_niveau_lot']<0.8).astype(float)
+
+    if _haie_niveau_snap is not None:
+        try:
+            df_nc = df_nc.merge(
+                _haie_niveau_snap[['nom','niveau_habituel']], on='nom', how='left')
+        except Exception: pass
+    if 'niveau_habituel' not in df_nc.columns:
+        df_nc['niveau_habituel'] = df_nc['montant_prix']
+    df_nc['niveau_habituel'] = df_nc['niveau_habituel'].fillna(df_nc['montant_prix'])
+    df_nc['ratio_niveau']    = (df_nc['montant_prix']/(df_nc['niveau_habituel']+1)).clip(0,5)
+
+    # Gains
+    df_nc['gains_annee'] = df_nc['gains_annee'].fillna(0)
+
+    # Prédiction
+    df_input = pd.DataFrame(index=df_nc.index)
+    for feat in feats:
+        df_input[feat] = df_nc[feat] if feat in df_nc.columns else fallback
+
+    scores_bruts = model.predict(df_input[feats])
+    score_brut   = pd.Series(scores_bruts, index=df_nc.index)
+    df_nc['note_pmu'] = _proba_to_note_v7(score_brut)
+
+    plage_scores = float(score_brut.max()-score_brut.min())
+    seuils = _haie_confiance_seuils
+    confiance_course = ('fort' if plage_scores>seuils.get('fort',0.7)
+                        else 'faible' if plage_scores<seuils.get('faible',0.3)
+                        else 'moyen')
+
+    if cal is not None:
+        try: score_final = pd.Series(cal.predict(score_brut.values), index=df_nc.index)
+        except Exception: score_final = score_brut
+    else:
+        score_final = score_brut
+    df_nc['proba_pmu'] = score_final
+
+    if '_cote_app' in df_nc.columns:
+        cote_val = df_nc['_cote_app'].fillna(10.0).clip(1.1,200)
+        df_nc['score_value'] = (df_nc['note_pmu']*np.log(cote_val)).round(1)
+    else:
+        df_nc['score_value'] = 0.0
+
+    # Scores affichage
+    df_nc['score_forme']     = df_nc['mus_score_pondere'].fillna(0)/9
+    df_nc['score_jockey']    = df_nc['rang_jockey_peloton'].fillna(0.5)
+    df_nc['score_duo']       = df_nc['entr_win_rate_bayes'].fillna(prior)
+    df_nc['score_historique']= df_nc['top3_3courses'].fillna(prior)
+    df_nc['score_gains']     = df_nc['gains_par_course'].fillna(0).clip(0,5000)/5000
+    df_nc['score_handicap']  = df_nc['rang_handicap_norm'].fillna(0.5)
+    df_nc['score_niveau']    = (1-df_nc['ratio_niveau_lot'].fillna(1).clip(0,2)/2)
+    df_nc['score_cote']      = 0.5
+
+    result = []
+    for _, row in df_nc.sort_values('note_pmu', ascending=False).iterrows():
+        result.append({
+            "numero":    int(row['numero']),
+            "nom":       str(row['nom']),
+            "note_pmu":  int(row['note_pmu']),
+            "proba_pmu": round(float(row['proba_pmu'])*100,1) if pd.notna(row['proba_pmu']) else 0,
+            "driver":    str(row['driver']),
+            "cote":      float(row['_cote_app']) if pd.notna(row.get('_cote_app')) else None,
+            "avis":      0,
+            "scores": {
+                "forme":      int(round(float(row['score_forme'])*100)),
+                "duo":        int(round(float(row['score_duo'])*100)),
+                "jockey":     int(round(float(row['score_jockey'])*100)),
+                "historique": int(round(float(row['score_historique'])*100)),
+                "gains":      int(round(float(row['score_gains'])*100)),
+                "handicap":   int(round(float(row['score_handicap'])*100)),
+                "niveau":     int(round(float(row['score_niveau'])*100)),
+                "cote":       0,
+            },
+            "taux_disq":  round(float(row['mus_taux_disq'])*100,1) if pd.notna(row.get('mus_taux_disq')) else 0,
+            "musique":    str(row.get('musique','')) if row.get('musique') else '',
+            "score_value": round(float(row.get('score_value',0)),1),
+            "handicap_poids":  int(row.get('handicap_poids',0)),
+            "handicap_valeur": float(row.get('handicap_valeur',0)),
+        })
+
+    return jsonify({
+        "date":      date_str,
+        "reunion":   r_num,
+        "course":    c_num,
+        "discipline":"HAIE",
+        "version":   bundle.get('version','haie_v1_ranking'),
+        "chevaux":   result,
+        "confiance": confiance_course,
+        "plage":     round(plage_scores,3),
+    })
+
+
+def _charger_snapshots_haie():
+    """Charge les snapshots HAIE depuis haie_snapshots.json.gz."""
+    global _haie_jockey_stats, _haie_entr_stats
+    global _haie_top3_3c_snap, _haie_top3_60j_snap
+    global _haie_regularite_snap, _haie_apt_dist_snap
+    global _haie_niveau_lot_snap, _haie_niveau_snap, _haie_confiance_seuils
+
+    if not os.path.exists(HAIE_SNAPSHOTS_PATH):
+        print(f"⚠️  {HAIE_SNAPSHOTS_PATH} introuvable — snapshots HAIE depuis pkl uniquement")
+        return
+    try:
+        import gzip, json
+        print(f"📊 Chargement snapshots HAIE depuis {HAIE_SNAPSHOTS_PATH}…")
+        with gzip.open(HAIE_SNAPSHOTS_PATH, 'rt', encoding='utf-8') as f:
+            snaps = json.load(f)
+
+        def to_df(key):
+            data = snaps.get(key, [])
+            return pd.DataFrame(data) if data else None
+
+        _haie_jockey_stats    = to_df('jockey_stats')
+        _haie_entr_stats      = to_df('entr_stats')
+        _haie_top3_3c_snap    = to_df('top3_3courses_snap')
+        _haie_top3_60j_snap   = to_df('top3_60j_snap')
+        _haie_regularite_snap = to_df('regularite_snap')
+        _haie_apt_dist_snap   = to_df('apt_dist_snap')
+        _haie_niveau_lot_snap = to_df('niveau_lot_snap')
+        _haie_niveau_snap     = to_df('niveau_snap')
+
+        date_ref = snaps.get('_date_ref','?')
+        n_jky = len(_haie_jockey_stats) if _haie_jockey_stats is not None else 0
+        n_chx = len(_haie_top3_3c_snap) if _haie_top3_3c_snap is not None else 0
+        print(f"✅ Snapshots HAIE chargés depuis JSON (date_ref={date_ref})")
+        print(f"   {n_jky} jockeys · {n_chx} chevaux")
+    except Exception as e:
+        print(f"❌ Erreur chargement snapshots HAIE : {e}")
+
 
 def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
     """Pipeline inférence MONTE V1 — XGBoost Ranking."""
@@ -2936,6 +3185,25 @@ def _charger_modeles_galop():
                     _monte_confiance_seuils = bundle['confiance_seuils']
                 print(f"  ✅ Snapshots MONTE V1 chargés")
 
+            # ── HAIE V1 Ranking ──────────────────────────────
+            if disc == 'HAIE' and mod_type == 'ranking':
+                global _haie_jockey_stats, _haie_entr_stats
+                global _haie_top3_3c_snap, _haie_top3_60j_snap
+                global _haie_regularite_snap, _haie_apt_dist_snap
+                global _haie_niveau_lot_snap, _haie_niveau_snap
+                global _haie_confiance_seuils
+                _haie_jockey_stats    = bundle.get('jockey_stats')
+                _haie_entr_stats      = bundle.get('entr_stats')
+                _haie_top3_3c_snap    = bundle.get('top3_3courses_snap')
+                _haie_top3_60j_snap   = bundle.get('top3_60j_snap')
+                _haie_regularite_snap = bundle.get('regularite_snap')
+                _haie_apt_dist_snap   = bundle.get('apt_dist_snap')
+                _haie_niveau_lot_snap = bundle.get('niveau_lot_snap')
+                _haie_niveau_snap     = bundle.get('niveau_snap')
+                if bundle.get('confiance_seuils'):
+                    _haie_confiance_seuils = bundle['confiance_seuils']
+                print(f"  ✅ Snapshots HAIE V1 chargés")
+
         except Exception as e:
             print(f"❌ Erreur chargement {path} : {e}")
     print(f"✅ {len(_models_galop)} modèles galop chargés")
@@ -2947,10 +3215,11 @@ def _charger_modeles_galop():
 _charger_modele_pmu()
 initialiser()
 _entrainer_v7()
-_charger_modeles_galop()       # charge les snapshots pkl en premier
-_charger_snapshots_attele()    # écrase avec snapshots attelé à jour
-_charger_snapshots_monte()     # écrase avec snapshots MONTE à jour
-_charger_stats_plat()          # écrase avec snapshots PLAT à jour
+_charger_modeles_galop()
+_charger_snapshots_attele()
+_charger_snapshots_monte()
+_charger_snapshots_haie()
+_charger_stats_plat()
 _charger_jockey_stats_galop()
 
 if __name__ == '__main__':
