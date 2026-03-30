@@ -437,7 +437,7 @@ _progression_snap      = None   # progression_norm par cheval
 _aptitude_snap         = None   # aptitude_piste par cheval/tranche
 # Snapshots V12 — nouvelles features ranking
 _niveau_snap           = None   # niveau_habituel par cheval
-_confiance_seuils      = {'faible': 1.24, 'moyen': 1.585, 'fort': 1.651}
+_confiance_seuils      = {'faible': 3.841, 'moyen': 5.028, 'fort': 5.398}
 _fallback_rk_v9        = {'court': 76000, 'moyen': 75100,
                            'long': 76000, 'tres_long': 76500}
 _duo_fiable_seuil_v9   = 5
@@ -460,7 +460,7 @@ _plat_niveau_lot_snap     = None
 _plat_niveau_snap         = None
 _plat_jockey_hippo_stats  = None
 _plat_aptitude_hippo_snap = None
-_plat_confiance_seuils    = {'faible': 0.418, 'moyen': 0.531, 'fort': 0.651}
+_plat_confiance_seuils    = {'faible': 0.256, 'moyen': 0.325, 'fort': 0.403}
 
 # Globals MONTE V1 Ranking
 _monte_jockey_stats     = None
@@ -472,7 +472,7 @@ _monte_regularite_snap  = None
 _monte_apt_dist_snap    = None
 _monte_niveau_lot_snap  = None
 _monte_niveau_snap      = None
-_monte_confiance_seuils = {'faible': 0.3, 'moyen': 0.5, 'fort': 0.7}
+_monte_confiance_seuils = {'faible': 0.096, 'moyen': 0.122, 'fort': 0.144}
 
 # Globals HAIE V1 Ranking
 _haie_jockey_stats    = None
@@ -483,7 +483,7 @@ _haie_regularite_snap = None
 _haie_apt_dist_snap   = None
 _haie_niveau_lot_snap = None
 _haie_niveau_snap     = None
-_haie_confiance_seuils = {'faible': 0.3, 'moyen': 0.5, 'fort': 0.7}
+_haie_confiance_seuils = {'faible': 0.083, 'moyen': 0.106, 'fort': 0.134}
 
 DISC_MUSIQUE_MAP = {'a': 0, 'm': 1, 'p': 2, 'h': 3, 's': 4, 'c': 5}
 DISCIPLINE_MAP   = {'TROT_ATTELE': 0, 'TROT_MONTE': 1, 'PLAT': 2, 'OBSTACLE': 3}
