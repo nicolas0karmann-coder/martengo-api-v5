@@ -1956,10 +1956,17 @@ def notes_pmu():
 
     # Nécessite reduction_km_v2 — calculé juste après
     # On le calcule d'abord pour les features peloton
+    # Priorité : 1) chrono PMU live  2) chrono_cache historique  3) fallback
     def _get_rk_v2_val(row):
         rk = row.get('reduction_km_corr', 0)
         if rk and rk > 0 and rk != 72600:
             return rk
+        # Lookup dans le cache historique (meilleur chrono des 3 dernières courses)
+        nom = str(row.get('nom', '')).upper().strip()
+        rk_hist = _chrono_cache.get(nom)
+        if rk_hist and 60000 < rk_hist < 90000:
+            return rk_hist
+        # Fallback seulement si vraiment aucun chrono disponible
         return _fallback_rk_v9.get(str(row.get('tranche_distance', 'long')), 76100)
     df_nc['reduction_km_v2'] = df_nc.apply(_get_rk_v2_val, axis=1)
     df_nc['reduction_km']    = df_nc['reduction_km_v2']
