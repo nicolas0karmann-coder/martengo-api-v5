@@ -1964,15 +1964,19 @@ def notes_pmu():
     df_nc['reduction_km_v2'] = df_nc.apply(_get_rk_v2_val, axis=1)
     df_nc['reduction_km']    = df_nc['reduction_km_v2']
 
-    # ── rk_brut + flag_chrono — chrono réel vs fallback ──────
-    # reduction_km_corr = 72600 quand chrono absent (valeur sentinelle)
-    # rk_brut = vrai chrono si valide, None si absent
+    # ── rk_brut + flag_chrono — chrono depuis cache historique ──
+    # reduction_km_corr = 72600 en production (course pas encore jouée)
+    # On utilise _chrono_cache (meilleur rk des 3 dernières courses)
     def _get_rk_brut(row):
+        # D'abord essayer reduction_km_corr (si dispo et valide)
         rk = row.get('reduction_km_corr', 72600)
-        # 72600 = valeur sentinelle "pas de chrono"
-        # <70000 ou >90000 = valeur aberrante
         if rk and rk != 72600 and 60000 < rk < 90000:
             return float(rk)
+        # Sinon lookup dans le cache historique
+        nom = str(row.get('nom', '')).upper().strip()
+        rk_hist = _chrono_cache.get(nom)
+        if rk_hist and 60000 < rk_hist < 90000:
+            return float(rk_hist)
         return None
     df_nc['rk_brut'] = df_nc.apply(_get_rk_brut, axis=1)
 
@@ -2585,6 +2589,9 @@ def _charger_jockey_stats_galop():
 # ============================================================
 PLAT_SNAPSHOTS_PATH   = "plat_snapshots.json.gz"
 ATTELE_SNAPSHOTS_PATH = "attele_snapshots.json.gz"
+# Cache chrono : nom → meilleur rk des 3 dernières courses valides
+# Chargé depuis attele_snapshots.json.gz (généré en Colab)
+_chrono_cache = {}
 MONTE_SNAPSHOTS_PATH  = "monte_snapshots.json.gz"
 HAIE_SNAPSHOTS_PATH   = "haie_snapshots.json.gz"
 
@@ -3097,12 +3104,17 @@ def _charger_snapshots_attele():
         _top3_60j_snap        = to_df('top3_60j_snap')
         _niveau_snap          = to_df('niveau_snap')
 
+        # Chrono cache
+        chrono_raw = snaps.get('chrono_cache', {})
+        _chrono_cache.update({k.upper().strip(): v for k, v in chrono_raw.items()})
+
         date_ref = snaps.get('_date_ref', '?')
         n_drv    = len(_driver_stats)   if _driver_stats   is not None else 0
         n_entr   = len(_entr_stats)     if _entr_stats     is not None else 0
         n_chx    = len(_top3_3courses_snap) if _top3_3courses_snap is not None else 0
         print(f"✅ Snapshots attelé chargés depuis JSON (date_ref={date_ref})")
         print(f"   {n_drv} drivers · {n_entr} entraîneurs · {n_chx} chevaux")
+        print(f"   {len(_chrono_cache)} chevaux dans chrono_cache")
 
     except Exception as e:
         print(f"❌ Erreur chargement snapshots attelé : {e}")
