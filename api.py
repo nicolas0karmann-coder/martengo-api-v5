@@ -1965,10 +1965,13 @@ def notes_pmu():
     df_nc['reduction_km']    = df_nc['reduction_km_v2']
 
     # ── rk_brut + flag_chrono — chrono réel vs fallback ──────
-    # rk_brut = vrai chrono si valide, None si fallback utilisé
+    # reduction_km_corr = 72600 quand chrono absent (valeur sentinelle)
+    # rk_brut = vrai chrono si valide, None si absent
     def _get_rk_brut(row):
-        rk = row.get('reduction_km_corr', 0)
-        if rk and rk > 0 and rk != 72600:
+        rk = row.get('reduction_km_corr', 72600)
+        # 72600 = valeur sentinelle "pas de chrono"
+        # <70000 ou >90000 = valeur aberrante
+        if rk and rk != 72600 and 60000 < rk < 90000:
             return float(rk)
         return None
     df_nc['rk_brut'] = df_nc.apply(_get_rk_brut, axis=1)
