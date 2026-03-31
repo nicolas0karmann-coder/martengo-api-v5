@@ -1176,6 +1176,7 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
             "handicap_poids":  int(row.get('handicap_poids', 0)),
             "handicap_valeur": float(row.get('handicap_valeur', 0)),
             "score_value":     round(float(row.get('score_value', 0)), 1),
+            "nb_courses_base": int(row.get('mus_nb_courses', 0)),
         })
 
     return jsonify({
@@ -2290,6 +2291,7 @@ def notes_pmu():
             "musique":      str(row.get('musique', '')) if row.get('musique') else '',
             "courses_60j":  int(row['courses_60j']) if pd.notna(row.get('courses_60j')) else 0,
             "score_value":  round(float(row.get('score_value', 0)), 2),
+            "nb_courses_base": int(row.get('mus_nb_courses', 0)),
         })
 
     # Indice de confiance de la course (calculé sur le peloton)
@@ -2735,6 +2737,7 @@ def _notes_pmu_haie_v1(df_nc, date_str, r_num, c_num):
             "score_value": round(float(row.get('score_value',0)),1),
             "handicap_poids":  int(row.get('handicap_poids',0)),
             "handicap_valeur": float(row.get('handicap_valeur',0)),
+            "nb_courses_base": int(row.get('mus_nb_courses', 0)),
         })
 
     return jsonify({
@@ -2974,6 +2977,7 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
             "score_value": round(float(row.get('score_value',0)),1),
             "handicap_poids":  int(row.get('handicap_poids',0)),
             "handicap_valeur": float(row.get('handicap_valeur',0)),
+            "nb_courses_base": int(row.get('mus_nb_courses', 0)),
         })
 
     return jsonify({
