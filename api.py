@@ -1177,6 +1177,8 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
             "handicap_valeur": float(row.get('handicap_valeur', 0)),
             "score_value":     round(float(row.get('score_value', 0)), 1),
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
+            "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
+            "flag_chrono":     str(row.get('flag_chrono', 'ok')),
         })
 
     return jsonify({
@@ -1962,6 +1964,29 @@ def notes_pmu():
     df_nc['reduction_km_v2'] = df_nc.apply(_get_rk_v2_val, axis=1)
     df_nc['reduction_km']    = df_nc['reduction_km_v2']
 
+    # ── rk_brut + flag_chrono — chrono réel vs fallback ──────
+    # rk_brut = vrai chrono si valide, None si fallback utilisé
+    def _get_rk_brut(row):
+        rk = row.get('reduction_km_corr', 0)
+        if rk and rk > 0 and rk != 72600:
+            return float(rk)
+        return None
+    df_nc['rk_brut'] = df_nc.apply(_get_rk_brut, axis=1)
+
+    # Médiane des vrais chronos du peloton (sans fallback)
+    rk_bruts_valides = df_nc['rk_brut'].dropna()
+    rk_median_peloton = float(rk_bruts_valides.median()) if len(rk_bruts_valides) >= 3 else None
+
+    def _flag_chrono(rk, median):
+        if rk is None:    return 'inconnu'   # pas de chrono → fallback utilisé
+        if median is None: return 'ok'
+        if rk > median + 1500: return 'faible'   # chrono nettement plus lent
+        if rk < median - 1500: return 'fort'     # chrono nettement plus rapide
+        return 'ok'
+
+    df_nc['flag_chrono'] = df_nc['rk_brut'].apply(
+        lambda x: _flag_chrono(x, rk_median_peloton))
+
     # ── rang_rk_peloton — rang chrono dans le peloton ────────
     rk_vals  = df_nc['reduction_km_v2'].values.astype(float)
     rk_clean = np.where((rk_vals > 0) & (rk_vals < 100000), rk_vals, np.nan)
@@ -2292,6 +2317,8 @@ def notes_pmu():
             "courses_60j":  int(row['courses_60j']) if pd.notna(row.get('courses_60j')) else 0,
             "score_value":  round(float(row.get('score_value', 0)), 2),
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
+            "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
+            "flag_chrono":     str(row.get('flag_chrono', 'ok')),
         })
 
     # Indice de confiance de la course (calculé sur le peloton)
@@ -2738,6 +2765,8 @@ def _notes_pmu_haie_v1(df_nc, date_str, r_num, c_num):
             "handicap_poids":  int(row.get('handicap_poids',0)),
             "handicap_valeur": float(row.get('handicap_valeur',0)),
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
+            "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
+            "flag_chrono":     str(row.get('flag_chrono', 'ok')),
         })
 
     return jsonify({
@@ -2978,6 +3007,8 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
             "handicap_poids":  int(row.get('handicap_poids',0)),
             "handicap_valeur": float(row.get('handicap_valeur',0)),
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
+            "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
+            "flag_chrono":     str(row.get('flag_chrono', 'ok')),
         })
 
     return jsonify({
