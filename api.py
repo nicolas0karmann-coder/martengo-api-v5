@@ -1179,6 +1179,7 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
+            "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
 
     return jsonify({
@@ -1963,9 +1964,11 @@ def notes_pmu():
             return rk
         # Lookup dans le cache historique (meilleur chrono des 3 dernières courses)
         nom = str(row.get('nom', '')).upper().strip()
-        rk_hist = _chrono_cache.get(nom)
-        if rk_hist and 60000 < rk_hist < 90000:
-            return rk_hist
+        rk_entry = _chrono_cache.get(nom)
+        if rk_entry:
+            rk_hist = rk_entry['min'] if isinstance(rk_entry, dict) else float(rk_entry)
+            if 60000 < rk_hist < 90000:
+                return rk_hist
         # Fallback seulement si vraiment aucun chrono disponible
         return _fallback_rk_v9.get(str(row.get('tranche_distance', 'long')), 76100)
     df_nc['reduction_km_v2'] = df_nc.apply(_get_rk_v2_val, axis=1)
@@ -1981,9 +1984,11 @@ def notes_pmu():
             return float(rk)
         # Sinon lookup dans le cache historique
         nom = str(row.get('nom', '')).upper().strip()
-        rk_hist = _chrono_cache.get(nom)
-        if rk_hist and 60000 < rk_hist < 90000:
-            return float(rk_hist)
+        rk_entry = _chrono_cache.get(nom)
+        if rk_entry:
+            rk_hist = rk_entry['min'] if isinstance(rk_entry, dict) else float(rk_entry)
+            if 60000 < rk_hist < 90000:
+                return float(rk_hist)
         return None
     df_nc['rk_brut'] = df_nc.apply(_get_rk_brut, axis=1)
 
@@ -2000,6 +2005,20 @@ def notes_pmu():
 
     df_nc['flag_chrono'] = df_nc['rk_brut'].apply(
         lambda x: _flag_chrono(x, rk_median_peloton))
+
+    # ── tendance_chrono — progression/dégradation ─────────────
+    def _tendance_chrono(nom):
+        entry = _chrono_cache.get(str(nom).upper().strip())
+        if not entry or not isinstance(entry, dict): return 'inconnu'
+        hist = entry.get('history', [])
+        if len(hist) < 2: return 'stable'
+        # hist[0] = plus récent, hist[-1] = plus ancien
+        # Si recent < ancien → amélioration (rk plus bas = plus rapide)
+        ecart = hist[0] - hist[-1]
+        if ecart < -500:  return 'progres'     # s'améliore
+        if ecart > 500:   return 'degradation' # se dégrade
+        return 'stable'
+    df_nc['tendance_chrono'] = df_nc['nom'].apply(_tendance_chrono)
 
     # ── rang_rk_peloton — rang chrono dans le peloton ────────
     rk_vals  = df_nc['reduction_km_v2'].values.astype(float)
@@ -2333,6 +2352,7 @@ def notes_pmu():
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
+            "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
 
     # Indice de confiance de la course (calculé sur le peloton)
@@ -2784,6 +2804,7 @@ def _notes_pmu_haie_v1(df_nc, date_str, r_num, c_num):
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
+            "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
 
     return jsonify({
@@ -3026,6 +3047,7 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
+            "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
 
     return jsonify({
@@ -3111,9 +3133,15 @@ def _charger_snapshots_attele():
         _top3_60j_snap        = to_df('top3_60j_snap')
         _niveau_snap          = to_df('niveau_snap')
 
-        # Chrono cache
+        # Chrono cache — format {min, last, history} ou float (ancien format)
         chrono_raw = snaps.get('chrono_cache', {})
-        _chrono_cache.update({k.upper().strip(): v for k, v in chrono_raw.items()})
+        for k, v in chrono_raw.items():
+            key = k.upper().strip()
+            if isinstance(v, dict):
+                _chrono_cache[key] = v
+            else:
+                # Ancien format float → convertir
+                _chrono_cache[key] = {'min': float(v), 'last': float(v), 'history': [float(v)]}
 
         date_ref = snaps.get('_date_ref', '?')
         n_drv    = len(_driver_stats)   if _driver_stats   is not None else 0
