@@ -590,6 +590,7 @@ def _parser_musique_api(musique):
             'mus_nb_tombes': 0, 'mus_nb_arretes': 0,
             'mus_tendance': 0.0, 'mus_score_pondere': 0.0,
             'mus_disc_principale': -1, 'mus_nb_disciplines': 0,
+            'taux_disq_recent': 0.0,
         }
     clean   = re.sub(r'\(\d+\)', '', musique).strip()
     tokens  = re.findall(r'[0-9DATRdat][amphsc]', clean)
@@ -601,6 +602,7 @@ def _parser_musique_api(musique):
             'mus_nb_tombes': 0, 'mus_nb_arretes': 0,
             'mus_tendance': 0.0, 'mus_score_pondere': 0.0,
             'mus_disc_principale': -1, 'mus_nb_disciplines': 0,
+            'taux_disq_recent': 0.0,
         }
     entries, nb_disq, nb_tombes, nb_arretes = [], 0, 0, 0
     for tok in tokens[:10]:
@@ -626,6 +628,7 @@ def _parser_musique_api(musique):
             'mus_nb_tombes': 0, 'mus_nb_arretes': 0,
             'mus_tendance': 0.0, 'mus_score_pondere': 0.0,
             'mus_disc_principale': -1, 'mus_nb_disciplines': 0,
+            'taux_disq_recent': 0.0,
         }
     places      = [e[0] for e in entries]
     disciplines = [e[1] for e in entries]
@@ -652,6 +655,7 @@ def _parser_musique_api(musique):
         'mus_score_pondere':   score_p,
         'mus_disc_principale': disc_principale,
         'mus_nb_disciplines':  len(disc_counter),
+        'taux_disq_recent':    round(sum(1 for t in tokens[:3] if t[0].upper()=='D') / 3, 3),
     }
 
 
