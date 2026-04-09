@@ -1237,10 +1237,27 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
     s_derniere = _norm_mix_g(15 - df_nc['mus_derniere_place'], 0, 14)
     s_podiums  = _norm_mix_g(df_nc['mus_nb_podiums'], 0, 5)
     s_disq     = 1 - _norm_g(df_nc['mus_taux_disq'], 0, 0.3)
+    # Bug fix : pénaliser fortement les disqualifications récentes (3 dernières courses)
+    def _nb_disq_recent_g(musique):
+        import re as _re
+        if not musique: return 0
+        clean = _re.sub(r'\(\d+\)', '', str(musique)).strip()
+        tokens = _re.findall(r'[0-9DATRdat][amphsc]', clean)[:3]
+        return sum(1 for t in tokens if t[0].upper() == 'D')
+    df_nc['_nb_disq_recent'] = df_nc['musique'].apply(_nb_disq_recent_g) if 'musique' in df_nc.columns else 0
+    s_disq_recent = (2 - df_nc['_nb_disq_recent'].clip(0, 2)) / 2
     s_chutes   = 1 - _norm_g(df_nc['mus_nb_tombes'], 0, 3)
     s_age      = 1 - _norm_g(df_nc['age'].fillna(5), 3, 12)
-    df_nc['score_forme'] = (s_score_p*0.30 + s_derniere*0.25 + s_podiums*0.15 +
-                            s_disq*0.10 + s_chutes*0.10 + s_age*0.10).clip(0, 1)
+    df_nc['score_forme'] = (
+        s_score_p     * 0.25 +
+        s_derniere    * 0.20 +
+        s_podiums     * 0.12 +
+        s_disq        * 0.08 +
+        s_disq_recent * 0.20 +
+        s_chutes      * 0.08 +
+        s_age         * 0.07
+    ).clip(0, 1)
+    df_nc.drop(columns=['_nb_disq_recent'], inplace=True, errors='ignore')
 
     # ── Score duo / jockey selon discipline ────────────────────
     if discipline_raw in ('PLAT', 'HAIE'):
@@ -1996,29 +2013,46 @@ def notes_pmu():
     rk_bruts_valides = df_nc['rk_brut'].dropna()
     rk_median_peloton = float(rk_bruts_valides.median()) if len(rk_bruts_valides) >= 3 else None
 
-    def _flag_chrono(rk, median):
-        if rk is None:    return 'inconnu'   # pas de chrono → fallback utilisé
+    def _flag_chrono(rk, median, musique=''):
+        # Bug fix : pénaliser les disqualifications récentes (3 dernières courses)
+        # Si >= 2 disq dans les 3 dernières courses → flag faible peu importe le chrono
+        if musique:
+            import re as _re
+            clean_mus = _re.sub(r'\(\d+\)', '', str(musique)).strip()
+            tokens_mus = _re.findall(r'[0-9DATRdat][amphsc]', clean_mus)[:3]  # 3 dernières
+            nb_disq_recent = sum(1 for t in tokens_mus if t[0].upper() == 'D')
+            if nb_disq_recent >= 2:
+                return 'faible'  # trop de disq récentes → faible peu importe chrono
+        if rk is None:    return 'inconnu'
         if median is None: return 'ok'
-        if rk > median + 1500: return 'faible'   # chrono nettement plus lent
-        if rk < median - 1500: return 'fort'     # chrono nettement plus rapide
+        if rk > median + 1500: return 'faible'
+        if rk < median - 1500: return 'fort'
         return 'ok'
 
-    df_nc['flag_chrono'] = df_nc['rk_brut'].apply(
-        lambda x: _flag_chrono(x, rk_median_peloton))
+    df_nc['flag_chrono'] = df_nc.apply(
+        lambda row: _flag_chrono(row['rk_brut'], rk_median_peloton,
+                                  row.get('musique', '')), axis=1)
 
     # ── tendance_chrono — progression/dégradation ─────────────
-    def _tendance_chrono(nom):
+    def _tendance_chrono(nom, musique=''):
+        # Bug fix : si >= 2 disq dans les 3 dernières courses → degradation
+        if musique:
+            import re as _re
+            clean_mus = _re.sub(r'\(\d+\)', '', str(musique)).strip()
+            tokens_mus = _re.findall(r'[0-9DATRdat][amphsc]', clean_mus)[:3]
+            nb_disq_recent = sum(1 for t in tokens_mus if t[0].upper() == 'D')
+            if nb_disq_recent >= 2:
+                return 'degradation'
         entry = _chrono_cache.get(str(nom).upper().strip())
         if not entry or not isinstance(entry, dict): return 'inconnu'
         hist = entry.get('history', [])
         if len(hist) < 2: return 'stable'
-        # hist[0] = plus récent, hist[-1] = plus ancien
-        # Si recent < ancien → amélioration (rk plus bas = plus rapide)
         ecart = hist[0] - hist[-1]
-        if ecart < -500:  return 'progres'     # s'améliore
-        if ecart > 500:   return 'degradation' # se dégrade
+        if ecart < -500:  return 'progres'
+        if ecart > 500:   return 'degradation'
         return 'stable'
-    df_nc['tendance_chrono'] = df_nc['nom'].apply(_tendance_chrono)
+    df_nc['tendance_chrono'] = df_nc.apply(
+        lambda row: _tendance_chrono(row['nom'], row.get('musique', '')), axis=1)
 
     # ── rang_rk_peloton — rang chrono dans le peloton ────────
     rk_vals  = df_nc['reduction_km_v2'].values.astype(float)
@@ -2107,18 +2141,31 @@ def notes_pmu():
     s_podiums   = _norm_mix(df_nc['mus_nb_podiums'],     0, 5)
     s_disq      = 1 - _norm(df_nc['mus_taux_disq'], 0, 0.3)
     s_temps_mus = _norm_mix(df_nc['hist_moy_temps'].fillna(df_nc['hist_moy_temps'].median()).fillna(100), 60, 100)
-    s_age       = 1 - _norm(df_nc['age'].fillna(5), 3, 12)        # jeune = meilleur potentiel
-    s_deferre   = df_nc['deferre'].fillna(0).astype(float)        # déferré = signal positif
+    s_age       = 1 - _norm(df_nc['age'].fillna(5), 3, 12)
+    s_deferre   = df_nc['deferre'].fillna(0).astype(float)
+
+    # Bug fix : pénaliser fortement les disqualifications récentes (3 dernières courses)
+    def _nb_disq_recent(musique):
+        import re as _re
+        if not musique: return 0
+        clean = _re.sub(r'\(\d+\)', '', str(musique)).strip()
+        tokens = _re.findall(r'[0-9DATRdat][amphsc]', clean)[:3]
+        return sum(1 for t in tokens if t[0].upper() == 'D')
+    df_nc['_nb_disq_recent'] = df_nc['musique'].apply(_nb_disq_recent)
+    # Pénalité : 0 disq recent → 1.0, 1 disq → 0.5, 2+ disq → 0.0
+    s_disq_recent = (2 - df_nc['_nb_disq_recent'].clip(0, 2)) / 2
 
     df_nc['score_forme'] = (
-        s_score_p   * 0.30 +
-        s_derniere  * 0.25 +
-        s_podiums   * 0.15 +
-        s_disq      * 0.10 +
-        s_temps_mus * 0.10 +
-        s_age       * 0.05 +
-        s_deferre   * 0.05
+        s_score_p     * 0.25 +
+        s_derniere    * 0.20 +
+        s_podiums     * 0.12 +
+        s_disq        * 0.08 +
+        s_disq_recent * 0.20 +  # pénalité disq récentes fortement pondérée
+        s_temps_mus   * 0.10 +
+        s_age         * 0.03 +
+        s_deferre     * 0.02
     ).clip(0, 1)
+    df_nc.drop(columns=['_nb_disq_recent'], inplace=True, errors='ignore')
 
     # ── Score 2 : Duo cheval/driver ───────────────────────────
     s_winrate = _norm_mix(df_nc['duo_win_rate_bayes'], _fallback * 0.8, 0.65)
