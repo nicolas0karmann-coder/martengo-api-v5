@@ -193,6 +193,11 @@ def initialiser():
 # ============================================================
 # ROUTES API
 # ============================================================
+@app.route('/', methods=['GET', 'HEAD'])
+def index():
+    return jsonify({'status': 'ok', 'service': 'martengo-api'})
+
+
 @app.route('/programme', methods=['GET'])
 def programme():
     """Proxy vers l'API PMU — retourne le programme du jour."""
