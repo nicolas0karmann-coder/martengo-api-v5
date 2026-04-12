@@ -2709,7 +2709,9 @@ ATTELE_SNAPSHOTS_PATH = "attele_snapshots.json.gz"
 # Cache chrono : nom → meilleur rk des 3 dernières courses valides
 # Chargé depuis attele_snapshots.json.gz (généré en Colab)
 _chrono_cache = {}
-_chrono_cache_ferrure = {}  # nom||cat_ferrure → meilleur rk par ferrure
+_chrono_cache_ferrure = {}          # ATTELÉ nom||cat_ferrure → meilleur rk par ferrure
+_chrono_cache_monte = {}            # MONTE nom → meilleur rk
+_chrono_cache_ferrure_monte = {}    # MONTE nom||cat_ferrure → meilleur rk par ferrure
 MONTE_SNAPSHOTS_PATH  = "monte_snapshots.json.gz"
 HAIE_SNAPSHOTS_PATH   = "haie_snapshots.json.gz"
 
@@ -3075,6 +3077,42 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
     df_nc['niveau_habituel'] = df_nc['niveau_habituel'].fillna(df_nc['montant_prix'])
     df_nc['ratio_niveau']    = (df_nc['montant_prix']/(df_nc['niveau_habituel']+1)).clip(0,5)
 
+    # ── cat_ferrure + reduction_km_v2_ferrure ────────────────
+    def _get_cat_ferrure_monte(f):
+        if isinstance(f, (int, float)):
+            fi = int(f)
+            if fi == 3: return 'DEFERRE_TOTAL'
+            if fi in [1,2]: return 'DEFERRE_PARTIEL'
+            return 'FERRE'
+        f = str(f)
+        if 'ANTERIEURS_POSTERIEURS' in f and 'PROTEGE' not in f: return 'DEFERRE_TOTAL'
+        if 'DEFERRE' in f: return 'DEFERRE_PARTIEL'
+        return 'FERRE'
+
+    if 'deferre' in df_nc.columns:
+        df_nc['cat_ferrure'] = df_nc['deferre'].apply(_get_cat_ferrure_monte)
+    else:
+        df_nc['cat_ferrure'] = 'FERRE'
+
+    def _get_rk_ferrure_monte(row):
+        nom = str(row.get('nom','')).upper().strip()
+        ferrure = row.get('cat_ferrure','FERRE')
+        key = f"{nom}||{ferrure}"
+        entry = _chrono_cache_ferrure_monte.get(key)
+        if entry:
+            rk = entry['min'] if isinstance(entry, dict) else float(entry)
+            if 60000 < rk < 90000:
+                return rk
+        # Fallback sur cache global
+        entry2 = _chrono_cache_monte.get(nom)
+        if entry2:
+            rk2 = entry2['min'] if isinstance(entry2, dict) else float(entry2)
+            if 60000 < rk2 < 90000:
+                return rk2
+        return 76000.0
+
+    df_nc['reduction_km_v2_ferrure'] = df_nc.apply(_get_rk_ferrure_monte, axis=1)
+
     # Prédiction
     df_input = pd.DataFrame(index=df_nc.index)
     for feat in feats:
@@ -3187,11 +3225,20 @@ def _charger_snapshots_monte():
         _monte_niveau_lot_snap = to_df('niveau_lot_snap')
         _monte_niveau_snap     = to_df('niveau_snap')
 
+        # Charger chrono_cache_monte et chrono_cache_ferrure_monte
+        global _chrono_cache_monte, _chrono_cache_ferrure_monte
+        for key, v in snaps.get('chrono_cache_monte', {}).items():
+            _chrono_cache_monte[key] = v if isinstance(v, dict) else {'min':float(v),'last':float(v),'history':[float(v)]}
+        for key, v in snaps.get('chrono_cache_ferrure_monte', {}).items():
+            _chrono_cache_ferrure_monte[key] = v if isinstance(v, dict) else {'min':float(v),'last':float(v),'history':[float(v)]}
+
         date_ref = snaps.get('_date_ref','?')
         n_jky = len(_monte_jockey_stats) if _monte_jockey_stats is not None else 0
         n_chx = len(_monte_top3_3c_snap) if _monte_top3_3c_snap is not None else 0
         print(f"✅ Snapshots MONTE chargés depuis JSON (date_ref={date_ref})")
         print(f"   {n_jky} jockeys · {n_chx} chevaux")
+        print(f"   {len(_chrono_cache_monte)} chevaux dans chrono_cache_monte")
+        print(f"   {len(_chrono_cache_ferrure_monte)} entrées dans chrono_cache_ferrure_monte")
     except Exception as e:
         print(f"❌ Erreur chargement snapshots MONTE : {e}")
 
