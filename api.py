@@ -1188,6 +1188,8 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
+            "deferre":         str(row.get('cat_ferrure', row.get('deferre', 'FERRE'))),
+            "rk_ferrure":      float(row['reduction_km_v2_ferrure']) if pd.notna(row.get('reduction_km_v2_ferrure')) and row.get('reduction_km_v2_ferrure') else None,
             "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
 
@@ -2429,6 +2431,8 @@ def notes_pmu():
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
+            "deferre":         str(row.get('cat_ferrure', row.get('deferre', 'FERRE'))),
+            "rk_ferrure":      float(row['reduction_km_v2_ferrure']) if pd.notna(row.get('reduction_km_v2_ferrure')) and row.get('reduction_km_v2_ferrure') else None,
             "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
 
@@ -2882,6 +2886,8 @@ def _notes_pmu_haie_v1(df_nc, date_str, r_num, c_num):
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
+            "deferre":         str(row.get('cat_ferrure', row.get('deferre', 'FERRE'))),
+            "rk_ferrure":      float(row['reduction_km_v2_ferrure']) if pd.notna(row.get('reduction_km_v2_ferrure')) and row.get('reduction_km_v2_ferrure') else None,
             "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
 
@@ -3125,6 +3131,8 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
+            "deferre":         str(row.get('cat_ferrure', row.get('deferre', 'FERRE'))),
+            "rk_ferrure":      float(row['reduction_km_v2_ferrure']) if pd.notna(row.get('reduction_km_v2_ferrure')) and row.get('reduction_km_v2_ferrure') else None,
             "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
 
