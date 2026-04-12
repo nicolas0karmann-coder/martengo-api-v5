@@ -1949,6 +1949,13 @@ def notes_pmu():
     # deferre=3 dans l'historique = DEFERRE_4_MEMBRES
     if 'deferre' in df_nc.columns:
         df_nc['deferre_4'] = (df_nc['deferre'] == 3).astype(float)
+        # Catégorie ferrure pour chrono filtré
+        def _get_cat_ferrure(f):
+            f = str(f)
+            if 'ANTERIEURS_POSTERIEURS' in f and 'PROTEGE' not in f: return 'DEFERRE_TOTAL'
+            if 'DEFERRE' in f: return 'DEFERRE_PARTIEL'
+            return 'FERRE'
+        df_nc['cat_ferrure'] = df_nc['deferre'].apply(_get_cat_ferrure)
     else:
         df_nc['deferre_4'] = 0.0
 
@@ -1999,6 +2006,20 @@ def notes_pmu():
         return _fallback_rk_v9.get(str(row.get('tranche_distance', 'long')), 76100)
     df_nc['reduction_km_v2'] = df_nc.apply(_get_rk_v2_val, axis=1)
     df_nc['reduction_km']    = df_nc['reduction_km_v2']
+
+    # ── reduction_km_v2_ferrure — chrono filtré par ferrure du jour ──────
+    def _get_rk_ferrure(row):
+        nom = str(row.get('nom', '')).upper().strip()
+        ferrure = row.get('cat_ferrure', 'FERRE')
+        key = f"{nom}||{ferrure}"
+        entry = _chrono_cache_ferrure.get(key)
+        if entry:
+            rk = entry['min'] if isinstance(entry, dict) else float(entry)
+            if 60000 < rk < 90000:
+                return rk
+        # Fallback sur reduction_km_v2 si pas de chrono pour cette ferrure
+        return row['reduction_km_v2']
+    df_nc['reduction_km_v2_ferrure'] = df_nc.apply(_get_rk_ferrure, axis=1)
 
     # ── rk_brut + flag_chrono — chrono depuis cache historique ──
     # reduction_km_corr = 72600 en production (course pas encore jouée)
@@ -2675,6 +2696,7 @@ ATTELE_SNAPSHOTS_PATH = "attele_snapshots.json.gz"
 # Cache chrono : nom → meilleur rk des 3 dernières courses valides
 # Chargé depuis attele_snapshots.json.gz (généré en Colab)
 _chrono_cache = {}
+_chrono_cache_ferrure = {}  # nom||cat_ferrure → meilleur rk par ferrure
 MONTE_SNAPSHOTS_PATH  = "monte_snapshots.json.gz"
 HAIE_SNAPSHOTS_PATH   = "haie_snapshots.json.gz"
 
@@ -3199,6 +3221,15 @@ def _charger_snapshots_attele():
                 # Ancien format float → convertir
                 _chrono_cache[key] = {'min': float(v), 'last': float(v), 'history': [float(v)]}
 
+        # Charger chrono_cache_ferrure
+        global _chrono_cache_ferrure
+        chrono_ferrure_raw = snaps.get('chrono_cache_ferrure', {})
+        for key, v in chrono_ferrure_raw.items():
+            if isinstance(v, dict):
+                _chrono_cache_ferrure[key] = v
+            else:
+                _chrono_cache_ferrure[key] = {'min': float(v), 'last': float(v), 'history': [float(v)]}
+
         date_ref = snaps.get('_date_ref', '?')
         n_drv    = len(_driver_stats)   if _driver_stats   is not None else 0
         n_entr   = len(_entr_stats)     if _entr_stats     is not None else 0
@@ -3206,6 +3237,7 @@ def _charger_snapshots_attele():
         print(f"✅ Snapshots attelé chargés depuis JSON (date_ref={date_ref})")
         print(f"   {n_drv} drivers · {n_entr} entraîneurs · {n_chx} chevaux")
         print(f"   {len(_chrono_cache)} chevaux dans chrono_cache")
+        print(f"   {len(_chrono_cache_ferrure)} entrées dans chrono_cache_ferrure")
 
     except Exception as e:
         print(f"❌ Erreur chargement snapshots attelé : {e}")
