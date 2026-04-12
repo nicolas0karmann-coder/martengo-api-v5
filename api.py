@@ -1188,7 +1188,7 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
-            "deferre":         str(row.get('cat_ferrure', row.get('deferre', 'FERRE'))),
+            "deferre":         str(row.get('cat_ferrure', 'FERRE')),
             "rk_ferrure":      float(row['reduction_km_v2_ferrure']) if pd.notna(row.get('reduction_km_v2_ferrure')) and row.get('reduction_km_v2_ferrure') else None,
             "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
@@ -1952,7 +1952,16 @@ def notes_pmu():
     if 'deferre' in df_nc.columns:
         df_nc['deferre_4'] = (df_nc['deferre'] == 3).astype(float)
         # Catégorie ferrure pour chrono filtré
+        # deferre peut être un entier (0=ferré,1=partiel,2=partiel,3=total)
+        # ou une string PMU (FERRE, DEFERRE_ANTERIEURS, DEFERRE_ANTERIEURS_POSTERIEURS...)
         def _get_cat_ferrure(f):
+            # Format entier (encodé par _ferrage_map_pmu)
+            if isinstance(f, (int, float)):
+                fi = int(f)
+                if fi == 3: return 'DEFERRE_TOTAL'
+                if fi in [1, 2]: return 'DEFERRE_PARTIEL'
+                return 'FERRE'
+            # Format string PMU
             f = str(f)
             if 'ANTERIEURS_POSTERIEURS' in f and 'PROTEGE' not in f: return 'DEFERRE_TOTAL'
             if 'DEFERRE' in f: return 'DEFERRE_PARTIEL'
@@ -2431,7 +2440,7 @@ def notes_pmu():
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
-            "deferre":         str(row.get('cat_ferrure', row.get('deferre', 'FERRE'))),
+            "deferre":         str(row.get('cat_ferrure', 'FERRE')),
             "rk_ferrure":      float(row['reduction_km_v2_ferrure']) if pd.notna(row.get('reduction_km_v2_ferrure')) and row.get('reduction_km_v2_ferrure') else None,
             "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
@@ -2886,7 +2895,7 @@ def _notes_pmu_haie_v1(df_nc, date_str, r_num, c_num):
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
-            "deferre":         str(row.get('cat_ferrure', row.get('deferre', 'FERRE'))),
+            "deferre":         str(row.get('cat_ferrure', 'FERRE')),
             "rk_ferrure":      float(row['reduction_km_v2_ferrure']) if pd.notna(row.get('reduction_km_v2_ferrure')) and row.get('reduction_km_v2_ferrure') else None,
             "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
@@ -3131,7 +3140,7 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
             "nb_courses_base": int(row.get('mus_nb_courses', 0)),
             "rk_brut":         float(row['rk_brut']) if pd.notna(row.get('rk_brut')) and row.get('rk_brut') else None,
             "flag_chrono":     str(row.get('flag_chrono', 'ok')),
-            "deferre":         str(row.get('cat_ferrure', row.get('deferre', 'FERRE'))),
+            "deferre":         str(row.get('cat_ferrure', 'FERRE')),
             "rk_ferrure":      float(row['reduction_km_v2_ferrure']) if pd.notna(row.get('reduction_km_v2_ferrure')) and row.get('reduction_km_v2_ferrure') else None,
             "tendance_chrono": str(row.get('tendance_chrono', 'inconnu')),
         })
