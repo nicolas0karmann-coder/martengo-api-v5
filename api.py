@@ -2032,6 +2032,33 @@ def notes_pmu():
         return row['reduction_km_v2']
     df_nc['reduction_km_v2_ferrure'] = df_nc.apply(_get_rk_ferrure, axis=1)
 
+    # ── En production : remplacer reduction_km_v2 par reduction_km_v2_ferrure ─
+    # Le modèle a été entraîné avec reduction_km_v2 = chrono réel de la course
+    # En prod, on n'a pas le chrono réel → on utilise le meilleur chrono
+    # par ferrure du jour (plus pertinent que toutes ferrures confondues)
+    df_nc['reduction_km_v2'] = df_nc['reduction_km_v2_ferrure']
+
+    # ── taux_completion_ferrure — fiabilité chrono par ferrure ───────────
+    # Fallback : taux ferrure → taux global toutes ferrures → prior
+    def _get_completion_ferrure(row):
+        nom = str(row.get('nom','')).upper().strip()
+        ferrure = row.get('cat_ferrure','FERRE')
+        key = f"{nom}||{ferrure}"
+        # 1 — Taux par ferrure spécifique
+        entry = _chrono_cache_ferrure.get(key)
+        if entry and isinstance(entry, dict):
+            hist = entry.get('history', [])
+            if len(hist) > 0:
+                return sum(1 for r in hist if 60000 < r < 90000) / len(hist)
+        # 2 — Fallback : taux toutes ferrures
+        entry_g = _chrono_cache.get(nom)
+        if entry_g and isinstance(entry_g, dict):
+            hist_g = entry_g.get('history', [])
+            if len(hist_g) > 0:
+                return sum(1 for r in hist_g if 60000 < r < 90000) / len(hist_g)
+        return 0.77  # prior global ATTELÉ (~77% courses avec chrono valide)
+    df_nc['taux_completion_ferrure'] = df_nc.apply(_get_completion_ferrure, axis=1)
+
     # ── rk_brut + flag_chrono — chrono depuis cache historique ──
     # reduction_km_corr = 72600 en production (course pas encore jouée)
     # On utilise _chrono_cache (meilleur rk des 3 dernières courses)
@@ -2710,8 +2737,12 @@ ATTELE_SNAPSHOTS_PATH = "attele_snapshots.json.gz"
 # Chargé depuis attele_snapshots.json.gz (généré en Colab)
 _chrono_cache = {}
 _chrono_cache_ferrure = {}          # ATTELÉ nom||cat_ferrure → meilleur rk par ferrure
+_chrono_cache_completion = {}       # ATTELÉ nom||cat_ferrure → taux_completion
+_chrono_cache_completion_global = {}# ATTELÉ nom → taux_completion toutes ferrures
 _chrono_cache_monte = {}            # MONTE nom → meilleur rk
 _chrono_cache_ferrure_monte = {}    # MONTE nom||cat_ferrure → meilleur rk par ferrure
+_chrono_cache_completion_monte = {} # MONTE nom||cat_ferrure → taux_completion
+_chrono_cache_completion_global_monte = {} # MONTE nom → taux_completion toutes ferrures
 MONTE_SNAPSHOTS_PATH  = "monte_snapshots.json.gz"
 HAIE_SNAPSHOTS_PATH   = "haie_snapshots.json.gz"
 
@@ -3112,6 +3143,27 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
         return 76000.0
 
     df_nc['reduction_km_v2_ferrure'] = df_nc.apply(_get_rk_ferrure_monte, axis=1)
+
+    # ── taux_completion_ferrure — fiabilité chrono par ferrure MONTE ─────
+    # Fallback : taux ferrure → taux global toutes ferrures → prior
+    def _get_completion_ferrure_monte(row):
+        nom = str(row.get('nom','')).upper().strip()
+        ferrure = row.get('cat_ferrure','FERRE')
+        key = f"{nom}||{ferrure}"
+        # 1 — Taux par ferrure spécifique
+        entry = _chrono_cache_ferrure_monte.get(key)
+        if entry and isinstance(entry, dict):
+            hist = entry.get('history', [])
+            if len(hist) > 0:
+                return sum(1 for r in hist if 60000 < r < 90000) / len(hist)
+        # 2 — Fallback : taux toutes ferrures
+        entry_g = _chrono_cache_monte.get(nom)
+        if entry_g and isinstance(entry_g, dict):
+            hist_g = entry_g.get('history', [])
+            if len(hist_g) > 0:
+                return sum(1 for r in hist_g if 60000 < r < 90000) / len(hist_g)
+        return 0.77  # prior global MONTE (~77% courses avec chrono valide)
+    df_nc['taux_completion_ferrure'] = df_nc.apply(_get_completion_ferrure_monte, axis=1)
 
     # Prédiction
     df_input = pd.DataFrame(index=df_nc.index)
