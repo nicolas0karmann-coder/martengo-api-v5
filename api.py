@@ -2028,10 +2028,15 @@ def notes_pmu():
         ferrure = row.get('cat_ferrure', 'FERRE')
         key = f"{nom}||{ferrure}"
         entry = _chrono_cache_ferrure.get(key)
-        if entry:
-            rk = entry['min'] if isinstance(entry, dict) else float(entry)
-            if 60000 < rk < 90000:
-                return rk
+        if entry and isinstance(entry, dict):
+            hist = entry.get('history', [])
+            valides = [r for r in hist if 60000 < r < 90000]
+            if valides:
+                n = len(valides)
+                # Moyenne pondérée : plus récent = poids plus élevé
+                poids = [n - i for i in range(n)]
+                total = sum(poids)
+                return sum(v * p for v, p in zip(valides, poids)) / total
         # Fallback sur reduction_km_v2 si pas de chrono pour cette ferrure
         return row['reduction_km_v2']
     df_nc['reduction_km_v2_ferrure'] = df_nc.apply(_get_rk_ferrure, axis=1)
@@ -3182,16 +3187,24 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
         ferrure = row.get('cat_ferrure','FERRE')
         key = f"{nom}||{ferrure}"
         entry = _chrono_cache_ferrure_monte.get(key)
-        if entry:
-            rk = entry['min'] if isinstance(entry, dict) else float(entry)
-            if 60000 < rk < 90000:
-                return rk
+        if entry and isinstance(entry, dict):
+            hist = entry.get('history', [])
+            valides = [r for r in hist if 60000 < r < 90000]
+            if valides:
+                n = len(valides)
+                poids = [n - i for i in range(n)]
+                total = sum(poids)
+                return sum(v * p for v, p in zip(valides, poids)) / total
         # Fallback sur cache global
         entry2 = _chrono_cache_monte.get(nom)
-        if entry2:
-            rk2 = entry2['min'] if isinstance(entry2, dict) else float(entry2)
-            if 60000 < rk2 < 90000:
-                return rk2
+        if entry2 and isinstance(entry2, dict):
+            hist2 = entry2.get('history', [])
+            valides2 = [r for r in hist2 if 60000 < r < 90000]
+            if valides2:
+                n2 = len(valides2)
+                poids2 = [n2 - i for i in range(n2)]
+                total2 = sum(poids2)
+                return sum(v * p for v, p in zip(valides2, poids2)) / total2
         return 76000.0
 
     df_nc['reduction_km_v2_ferrure'] = df_nc.apply(_get_rk_ferrure_monte, axis=1)
