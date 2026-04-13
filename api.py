@@ -1608,6 +1608,10 @@ def notes_pmu():
             'handicap_valeur':   float(p.get('handicapValeur', 0) or 0),
             '_cote_app':         cote_app,
             'place_corde':       float(p.get('placeCorde', 0) or 0),
+            'nb_jours_absence':  (lambda ts: max(0, (pd.Timestamp.now() - pd.Timestamp(ts/1000, unit='s')).days)
+                                  if ts else 30)(
+                                  (p.get('dernierRapportDirect') or {}).get('dateRapport') or
+                                  (p.get('dernierRapportReference') or {}).get('dateRapport')),
             'terrain_label':     conditions.get('terrain_label', ''),
             'terrain_val':       float(conditions.get('terrain_val', 3.0)),
             'hippodrome_code':   conditions.get('hippodrome_code', ''),
@@ -2222,6 +2226,21 @@ def notes_pmu():
     df_nc['_nb_disq_recent'] = df_nc['musique'].apply(_nb_disq_recent)
     # Pénalité : 0 disq recent → 1.0, 1 disq → 0.5, 2+ disq → 0.0
     s_disq_recent = (2 - df_nc['_nb_disq_recent'].clip(0, 2)) / 2
+
+    # ── score_absence — jours depuis la dernière course ──────────────────
+    # Calculé depuis la musique : non disponible → utiliser date_derniere_course si dispo
+    # Fallback : 30 jours (valeur médiane historique → score neutre)
+    def _score_absence(row):
+        # Essayer de récupérer depuis les données PMU
+        nb_j = row.get('nb_jours_absence', None)
+        if nb_j is None or pd.isna(nb_j):
+            nb_j = 30  # fallback médiane
+        nb_j = float(nb_j)
+        nb_j = max(0, min(400, nb_j))
+        if 14 <= nb_j <= 28: return 1.0
+        elif nb_j > 28: return max(0.0, 1.0 - (nb_j - 28) / 372)
+        else: return max(0.5, nb_j / 14)
+    df_nc['score_absence'] = df_nc.apply(_score_absence, axis=1)
 
     df_nc['score_forme'] = (
         s_score_p     * 0.25 +
@@ -3107,6 +3126,18 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
         df_nc['niveau_habituel'] = df_nc['montant_prix']
     df_nc['niveau_habituel'] = df_nc['niveau_habituel'].fillna(df_nc['montant_prix'])
     df_nc['ratio_niveau']    = (df_nc['montant_prix']/(df_nc['niveau_habituel']+1)).clip(0,5)
+
+    # ── score_absence — jours depuis la dernière course MONTE ──────────
+    def _score_absence_monte(row):
+        nb_j = row.get('nb_jours_absence', None)
+        if nb_j is None or pd.isna(nb_j):
+            nb_j = 30
+        nb_j = float(nb_j)
+        nb_j = max(0, min(400, nb_j))
+        if 14 <= nb_j <= 28: return 1.0
+        elif nb_j > 28: return max(0.0, 1.0 - (nb_j - 28) / 372)
+        else: return max(0.5, nb_j / 14)
+    df_nc['score_absence'] = df_nc.apply(_score_absence_monte, axis=1)
 
     # ── cat_ferrure + reduction_km_v2_ferrure ────────────────
     def _get_cat_ferrure_monte(f):
