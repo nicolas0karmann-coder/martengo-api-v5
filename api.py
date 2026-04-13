@@ -2228,18 +2228,28 @@ def notes_pmu():
     s_disq_recent = (2 - df_nc['_nb_disq_recent'].clip(0, 2)) / 2
 
     # ── score_absence — jours depuis la dernière course ──────────────────
-    # Calculé depuis la musique : non disponible → utiliser date_derniere_course si dispo
-    # Fallback : 30 jours (valeur médiane historique → score neutre)
+    # Source : chrono_cache['date_derniere'] — date réelle dernière course
+    # Fallback : 30j si inconnu
+    today = pd.Timestamp.now().normalize()
     def _score_absence(row):
-        # Essayer de récupérer depuis les données PMU
-        nb_j = row.get('nb_jours_absence', None)
-        if nb_j is None or pd.isna(nb_j):
-            nb_j = 30  # fallback médiane
-        nb_j = float(nb_j)
+        nom = str(row.get('nom','')).upper().strip()
+        entry = _chrono_cache.get(nom)
+        nb_j = 30  # fallback
+        if entry and isinstance(entry, dict):
+            date_str = entry.get('date_derniere','')
+            if date_str:
+                try:
+                    date_last = pd.Timestamp(date_str)
+                    nb_j = (today - date_last).days
+                except: pass
         nb_j = max(0, min(400, nb_j))
-        if 14 <= nb_j <= 28: return 1.0
-        elif nb_j > 28: return max(0.0, 1.0 - (nb_j - 28) / 372)
-        else: return max(0.5, nb_j / 14)
+        if nb_j <= 7:   return 0.944 + (1.000 - 0.944) * (nb_j / 7)
+        if nb_j <= 21:  return 0.944 + (1.000 - 0.944) * ((nb_j-7) / 14)
+        if nb_j <= 45:  return 1.000 - (1.000 - 0.918) * ((nb_j-21) / 24)
+        if nb_j <= 75:  return 0.918 - (0.918 - 0.762) * ((nb_j-45) / 30)
+        if nb_j <= 135: return 0.762 - (0.762 - 0.673) * ((nb_j-75) / 60)
+        if nb_j <= 270: return 0.673 - (0.673 - 0.647) * ((nb_j-135) / 135)
+        return          0.647 - (0.647 - 0.587) * ((nb_j-270) / 130)
     df_nc['score_absence'] = df_nc.apply(_score_absence, axis=1)
 
     df_nc['score_forme'] = (
@@ -3128,15 +3138,26 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
     df_nc['ratio_niveau']    = (df_nc['montant_prix']/(df_nc['niveau_habituel']+1)).clip(0,5)
 
     # ── score_absence — jours depuis la dernière course MONTE ──────────
+    today_m = pd.Timestamp.now().normalize()
     def _score_absence_monte(row):
-        nb_j = row.get('nb_jours_absence', None)
-        if nb_j is None or pd.isna(nb_j):
-            nb_j = 30
-        nb_j = float(nb_j)
+        nom = str(row.get('nom','')).upper().strip()
+        entry = _chrono_cache_monte.get(nom)
+        nb_j = 30
+        if entry and isinstance(entry, dict):
+            date_str = entry.get('date_derniere','')
+            if date_str:
+                try:
+                    date_last = pd.Timestamp(date_str)
+                    nb_j = (today_m - date_last).days
+                except: pass
         nb_j = max(0, min(400, nb_j))
-        if 14 <= nb_j <= 28: return 1.0
-        elif nb_j > 28: return max(0.0, 1.0 - (nb_j - 28) / 372)
-        else: return max(0.5, nb_j / 14)
+        if nb_j <= 7:   return 0.944 + (1.000 - 0.944) * (nb_j / 7)
+        if nb_j <= 21:  return 0.944 + (1.000 - 0.944) * ((nb_j-7) / 14)
+        if nb_j <= 45:  return 1.000 - (1.000 - 0.918) * ((nb_j-21) / 24)
+        if nb_j <= 75:  return 0.918 - (0.918 - 0.762) * ((nb_j-45) / 30)
+        if nb_j <= 135: return 0.762 - (0.762 - 0.673) * ((nb_j-75) / 60)
+        if nb_j <= 270: return 0.673 - (0.673 - 0.647) * ((nb_j-135) / 135)
+        return          0.647 - (0.647 - 0.587) * ((nb_j-270) / 130)
     df_nc['score_absence'] = df_nc.apply(_score_absence_monte, axis=1)
 
     # ── cat_ferrure + reduction_km_v2_ferrure ────────────────
