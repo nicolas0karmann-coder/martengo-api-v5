@@ -1852,17 +1852,16 @@ def notes_pmu():
         df_nc['progression_norm'] = 0.0   # fallback = neutre
     df_nc['progression_norm'] = df_nc['progression_norm'].fillna(0.0)
 
-    # ── place_avantage ────────────────────────────────────────
+    # ── place_avantage — calibré sur données réelles (courbe en cloche) ─
+    _PA_MAP = {
+        1:0.797, 2:0.862, 3:0.900, 4:0.982, 5:1.001,
+        6:0.959, 7:0.958, 8:0.911, 9:0.828, 10:0.791,
+        11:0.810, 12:0.808, 13:0.753, 14:0.779, 15:0.742,
+        16:0.720, 17:0.763, 18:0.823
+    }
     def _avantage_numero(n):
-        try:
-            n = int(n)
-            if n <= 2:    return 1.0
-            elif n <= 5:  return 0.8
-            elif n <= 8:  return 0.5
-            elif n <= 12: return 0.3
-            else:         return 0.1
-        except:
-            return 0.5
+        try: return _PA_MAP.get(int(n), 0.75)
+        except: return 0.75
     df_nc['place_avantage'] = df_nc['numero'].apply(_avantage_numero)
 
     # ── aptitude_piste ────────────────────────────────────────
