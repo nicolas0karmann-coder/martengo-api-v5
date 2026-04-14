@@ -2131,24 +2131,25 @@ def notes_pmu():
     df_nc['tendance_chrono'] = df_nc.apply(
         lambda row: _tendance_chrono(row['nom'], row.get('musique', '')), axis=1)
 
-    # ── rang_rk_peloton — rang chrono dans le peloton ────────
-    rk_vals  = df_nc['reduction_km_v2'].values.astype(float)
-    rk_clean = np.where((rk_vals > 0) & (rk_vals < 100000), rk_vals, np.nan)
+    # ── rang_rk_peloton et ecart_meilleur_rk ────────────────
+    # V25 : utiliser reduction_km_v2_ferrure (anti-leakage) au lieu de reduction_km_v2
+    # cohérent avec l'entraînement du modèle V25
+    rk_vals  = df_nc['reduction_km_v2_ferrure'].values.astype(float)
+    rk_clean = np.where((rk_vals > 60000) & (rk_vals < 90000), rk_vals, np.nan)
     rk_med   = float(np.nanmedian(rk_clean)) if np.any(~np.isnan(rk_clean)) else 76000
     rk_fill  = np.where(np.isnan(rk_clean), rk_med, rk_clean)
 
     n = len(df_nc)
-    # Rang ascendant : 1 = RK le plus bas = le plus rapide
     rk_rank      = pd.Series(rk_fill).rank(ascending=True).values
-    rk_rank_norm = 1 - (rk_rank - 1) / max(n - 1, 1)  # 1.0 = meilleur
+    rk_rank_norm = 1 - (rk_rank - 1) / max(n - 1, 1)
     df_nc['rang_rk_peloton'] = rk_rank_norm
 
-    # ── ecart_meilleur_rk — écart au meilleur chrono ─────────
+    # ── ecart_meilleur_rk ─────────────────────────────────────
     rk_min = float(np.nanmin(rk_clean)) if np.any(~np.isnan(rk_clean)) else rk_med
     ecart  = rk_fill - rk_min
     ecart_max = ecart.max()
     if ecart_max > 0:
-        df_nc['ecart_meilleur_rk'] = 1 - (ecart / ecart_max)  # 1.0 = meilleur
+        df_nc['ecart_meilleur_rk'] = 1 - (ecart / ecart_max)
     else:
         df_nc['ecart_meilleur_rk'] = 0.5
 
