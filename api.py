@@ -1518,8 +1518,10 @@ def notes_pmu():
         return jsonify({"error": f"Modèle {discipline_raw} non disponible"}), 503
 
     # ── Participants ──────────────────────────────────────────
-    url = (f"https://offline.turfinfo.api.pmu.fr/rest/client/7/programme"
-           f"/{date_str}/R{r_num}/C{c_num}/participants")
+    # avecOrdreArrivee=false requis pour obtenir avisEntraineur en ATTELÉ/MONTÉ
+    url = (f"https://online.turfinfo.api.pmu.fr/rest/client/61/programme"
+           f"/{date_str}/R{r_num}/C{c_num}/participants"
+           f"?specialisation=INTERNET&avecOrdreArrivee=false")
     try:
         resp = http_requests.get(url, timeout=8)
         resp.raise_for_status()
