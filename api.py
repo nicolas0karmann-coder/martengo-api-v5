@@ -1518,16 +1518,31 @@ def notes_pmu():
         return jsonify({"error": f"Modèle {discipline_raw} non disponible"}), 503
 
     # ── Participants ──────────────────────────────────────────
-    # avecOrdreArrivee=false requis pour obtenir avisEntraineur en ATTELÉ/MONTÉ
-    url = (f"https://online.turfinfo.api.pmu.fr/rest/client/61/programme"
-           f"/{date_str}/R{r_num}/C{c_num}/participants"
-           f"?specialisation=INTERNET&avecOrdreArrivee=false")
+    # Stratégie : offline (stable) avec fallback online (pour avisEntraineur)
+    participants = []
+    _avis_map_raw = {}
+    # Tentative 1 — online avec avecOrdreArrivee=false (avisEntraineur disponible)
     try:
-        resp = http_requests.get(url, timeout=8)
-        resp.raise_for_status()
-        participants = resp.json().get('participants', [])
-    except Exception as e:
-        return jsonify({"error": f"Erreur API PMU : {str(e)}"}), 502
+        url_online = (f"https://online.turfinfo.api.pmu.fr/rest/client/61/programme"
+                      f"/{date_str}/R{r_num}/C{c_num}/participants"
+                      f"?specialisation=INTERNET&avecOrdreArrivee=false")
+        resp_on = http_requests.get(url_online, timeout=6)
+        if resp_on.status_code == 200:
+            participants = resp_on.json().get('participants', [])
+            _avis_map_raw = {str(p.get('numPmu','')): p.get('avisEntraineur','NEUTRE')
+                             for p in participants}
+    except Exception:
+        pass
+    # Tentative 2 — offline (plus stable) si online a échoué
+    if not participants:
+        try:
+            url_off = (f"https://offline.turfinfo.api.pmu.fr/rest/client/7/programme"
+                       f"/{date_str}/R{r_num}/C{c_num}/participants")
+            resp_off = http_requests.get(url_off, timeout=8)
+            resp_off.raise_for_status()
+            participants = resp_off.json().get('participants', [])
+        except Exception as e:
+            return jsonify({"error": f"Erreur API PMU : {str(e)}"}), 502
 
     if not participants:
         return jsonify({"error": "Aucun participant trouvé"}), 404
@@ -1597,7 +1612,9 @@ def notes_pmu():
             'gains_carriere':    gains_car,
             'gains_annee':       gains_ann,
             'reduction_km_corr': rk if rk > 0 else 72600,
-            'avis_entraineur':   _avis_map_pmu.get(p.get('avisEntraineur', 'NEUTRE'), 0),
+            'avis_entraineur':   _avis_map_pmu.get(
+                                    _avis_map_raw.get(str(p.get('numPmu','')),
+                                    p.get('avisEntraineur', 'NEUTRE')), 0),
             'rapport_ref':       float(rapport_ref),
             'rapport_direct':    float(cote_app) if cote_app else float(rapport_ref),
             'ecart_cotes':       float(cote_app - rapport_ref) if cote_app else 0.0,
