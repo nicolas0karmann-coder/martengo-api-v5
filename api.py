@@ -1295,16 +1295,21 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
             _driver_stats if _driver_stats is not None and 'driver_win_rate_bayes' in _driver_stats.columns else None
         )
         if jockey_source is not None:
-            df_nc['_driver_clean'] = df_nc['driver'].str.strip().str.upper()
-            jockey_merge = jockey_source.copy()
-            jockey_merge['driver'] = jockey_merge['driver'].str.strip().str.upper()
-            df_nc = df_nc.merge(
-                jockey_merge[['driver','driver_win_rate_bayes','driver_n']],
-                left_on='_driver_clean', right_on='driver', how='left',
-                suffixes=('','_jk'))
-            df_nc['jockey_win_rate_bayes'] = df_nc['driver_win_rate_bayes'].fillna(fallback)
-            df_nc['jockey_n']              = df_nc['driver_n'].fillna(0)
-            df_nc.drop(columns=['_driver_clean','driver_jk'], errors='ignore', inplace=True)
+            # Détection automatique : snapshots récents utilisent jockey_*, anciens driver_*
+            cols = jockey_source.columns
+            wr_col = 'jockey_win_rate_bayes' if 'jockey_win_rate_bayes' in cols else 'driver_win_rate_bayes'
+            n_col  = 'jockey_n' if 'jockey_n' in cols else 'driver_n'
+            if wr_col in cols and n_col in cols:
+                df_nc['_driver_clean'] = df_nc['driver'].str.strip().str.upper()
+                jockey_merge = jockey_source.copy()
+                jockey_merge['driver'] = jockey_merge['driver'].str.strip().str.upper()
+                df_nc = df_nc.merge(
+                    jockey_merge[['driver', wr_col, n_col]],
+                    left_on='_driver_clean', right_on='driver', how='left',
+                    suffixes=('','_jk'))
+                df_nc['jockey_win_rate_bayes'] = df_nc[wr_col].fillna(fallback)
+                df_nc['jockey_n']              = df_nc[n_col].fillna(0)
+                df_nc.drop(columns=['_driver_clean','driver_jk'], errors='ignore', inplace=True)
         df_nc['jockey_win_rate_bayes'] = df_nc['jockey_win_rate_bayes'].fillna(fallback)
         df_nc['jockey_n']              = df_nc['jockey_n'].fillna(0)
         df_nc['jockey_fiable']         = (df_nc['jockey_n'] >= 5).astype(float)
