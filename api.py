@@ -1383,27 +1383,53 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
     if discipline_raw == 'PLAT':
         fallback_v8 = bundle_galop.get('prior_win', 0.098) * bundle_galop.get('k_bayes', 10) / (bundle_galop.get('k_bayes', 10) + 1)
 
-        # Stats driver depuis bundle
-        driver_stats = bundle_galop.get('driver_stats')
+        # Stats driver depuis bundle — robuste aux deux nommages (jockey_* ou driver_*)
+        driver_stats = bundle_galop.get('driver_stats') or bundle_galop.get('jockey_stats')
         if driver_stats is not None:
-            df_nc = df_nc.merge(driver_stats[['driver','driver_win_rate_bayes','driver_n']],
-                                on='driver', how='left')
-        df_nc['driver_win_rate_bayes'] = df_nc.get('driver_win_rate_bayes', pd.Series([fallback_v8]*len(df_nc))).fillna(fallback_v8)
-        df_nc['driver_n']              = df_nc.get('driver_n', pd.Series([0]*len(df_nc))).fillna(0)
+            try:
+                cols_ds = driver_stats.columns
+                wr_col = 'driver_win_rate_bayes' if 'driver_win_rate_bayes' in cols_ds else ('jockey_win_rate_bayes' if 'jockey_win_rate_bayes' in cols_ds else None)
+                n_col  = 'driver_n' if 'driver_n' in cols_ds else ('jockey_n' if 'jockey_n' in cols_ds else None)
+                if wr_col and n_col and 'driver' in cols_ds:
+                    tmp = driver_stats[['driver', wr_col, n_col]].rename(
+                        columns={wr_col: 'driver_win_rate_bayes', n_col: 'driver_n'})
+                    df_nc = df_nc.merge(tmp, on='driver', how='left')
+            except Exception as e:
+                print(f"⚠️  Galop driver_stats merge échoué ({e})")
+        if 'driver_win_rate_bayes' not in df_nc.columns:
+            df_nc['driver_win_rate_bayes'] = fallback_v8
+        if 'driver_n' not in df_nc.columns:
+            df_nc['driver_n'] = 0
+        df_nc['driver_win_rate_bayes'] = df_nc['driver_win_rate_bayes'].fillna(fallback_v8)
+        df_nc['driver_n']              = df_nc['driver_n'].fillna(0)
 
-        # Stats duo depuis bundle
+        # Stats duo depuis bundle — robuste aux deux nommages
         duo_stats = bundle_galop.get('duo_stats')
         if duo_stats is not None:
-            df_nc = df_nc.merge(duo_stats[['nom','driver','duo_win_rate_bayes']],
-                                on=['nom','driver'], how='left')
-        df_nc['duo_win_rate_bayes'] = df_nc.get('duo_win_rate_bayes', pd.Series([fallback_v8]*len(df_nc))).fillna(fallback_v8)
+            try:
+                cols_du = duo_stats.columns
+                duo_col = 'duo_win_rate_bayes' if 'duo_win_rate_bayes' in cols_du else ('duo_jockey_win_rate' if 'duo_jockey_win_rate' in cols_du else None)
+                if duo_col and 'nom' in cols_du and 'driver' in cols_du:
+                    tmp = duo_stats[['nom','driver', duo_col]].rename(columns={duo_col: 'duo_win_rate_bayes'})
+                    df_nc = df_nc.merge(tmp, on=['nom','driver'], how='left')
+            except Exception as e:
+                print(f"⚠️  Galop duo_stats merge échoué ({e})")
+        if 'duo_win_rate_bayes' not in df_nc.columns:
+            df_nc['duo_win_rate_bayes'] = fallback_v8
+        df_nc['duo_win_rate_bayes'] = df_nc['duo_win_rate_bayes'].fillna(fallback_v8)
 
         # Stats entraineur depuis bundle
         entr_stats = bundle_galop.get('entr_stats')
         if entr_stats is not None:
-            df_nc = df_nc.merge(entr_stats[['entraineur','entr_win_rate_bayes']],
-                                on='entraineur', how='left')
-        df_nc['entr_win_rate_bayes'] = df_nc.get('entr_win_rate_bayes', pd.Series([fallback_v8]*len(df_nc))).fillna(fallback_v8)
+            try:
+                if 'entraineur' in entr_stats.columns and 'entr_win_rate_bayes' in entr_stats.columns:
+                    df_nc = df_nc.merge(entr_stats[['entraineur','entr_win_rate_bayes']],
+                                        on='entraineur', how='left')
+            except Exception as e:
+                print(f"⚠️  Galop entr_stats merge échoué ({e})")
+        if 'entr_win_rate_bayes' not in df_nc.columns:
+            df_nc['entr_win_rate_bayes'] = fallback_v8
+        df_nc['entr_win_rate_bayes'] = df_nc['entr_win_rate_bayes'].fillna(fallback_v8)
 
         # Spécialisation distance
         df_nc['tranche_dist'] = pd.cut(df_nc['distance'],
