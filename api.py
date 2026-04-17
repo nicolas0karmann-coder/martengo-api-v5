@@ -1470,7 +1470,13 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
     for feat in features_5:
         df_input[feat] = df_nc[feat] if feat in df_nc.columns else bundle_galop.get(f'median_{feat}', 0.5)
 
-    probas = bundle_galop['model'].predict_proba(df_input[features_5])[:, 1]
+    # Détection automatique XGBoost (sklearn API) vs LightGBM Booster
+    _mdl = bundle_galop['model']
+    if hasattr(_mdl, 'predict_proba'):
+        probas = _mdl.predict_proba(df_input[features_5])[:, 1]
+    else:
+        # LightGBM Booster ou XGBoost Booster : predict() retourne directement les scores
+        probas = np.asarray(_mdl.predict(df_input[features_5]))
 
     # PLAT V8 : pipeline brut sans score_cote (comme ATTELÉ)
     if discipline_raw == 'PLAT':
