@@ -170,24 +170,38 @@ def initialiser():
         df = pd.concat([df_base, df_manual], ignore_index=True).drop_duplicates()
         print(f"✅ {len(df_manual)} lignes manuelles fusionnées")
 
+    # Si pas de données : skip l'entraînement (modèles v5 fallback uniquement)
+    if len(df) == 0:
+        print("⚠️  Pas de données historiques v5 — skip entraînement modèle fallback")
+        model = None
+        modele_abs = None
+        note_mean = note_std = note_mean_a = note_std_a = 0.0
+        return
+
     df['date'] = pd.to_datetime(df['date'])
     # Assurer colonne score_cible pour compatibilité
     if 'score_cible' not in df.columns:
         df['score_cible'] = 0
 
-    # Modèle principal (cote >= 10)
-    df_p = df.copy()
-    df_p['target'] = ((df_p['rapport'] >= 10) & (df_p['rang_arrivee'] <= 3)).astype(int)
-    df_p, note_mean, note_std = _enrichir(df_p)
-    model = _entrainer(df_p, FEATURES, 'target')
+    try:
+        # Modèle principal (cote >= 10)
+        df_p = df.copy()
+        df_p['target'] = ((df_p['rapport'] >= 10) & (df_p['rang_arrivee'] <= 3)).astype(int)
+        df_p, note_mean, note_std = _enrichir(df_p)
+        model = _entrainer(df_p, FEATURES, 'target')
 
-    # Modèle absolu
-    df_a = df.copy()
-    df_a['target_absolu'] = (df_a['rang_arrivee'] <= 3).astype(int)
-    df_a, note_mean_a, note_std_a = _enrichir(df_a)
-    modele_abs = _entrainer(df_a, FEATURES_ABSOLU, 'target_absolu')
+        # Modèle absolu
+        df_a = df.copy()
+        df_a['target_absolu'] = (df_a['rang_arrivee'] <= 3).astype(int)
+        df_a, note_mean_a, note_std_a = _enrichir(df_a)
+        modele_abs = _entrainer(df_a, FEATURES_ABSOLU, 'target_absolu')
 
-    print(f"✅ Modèles entraînés sur {len(df)} lignes / {df['date'].nunique()} courses")
+        print(f"✅ Modèles entraînés sur {len(df)} lignes / {df['date'].nunique()} courses")
+    except Exception as e:
+        print(f"⚠️  Impossible d'entraîner les modèles v5 fallback : {e}")
+        model = None
+        modele_abs = None
+        note_mean = note_std = note_mean_a = note_std_a = 0.0
 
 
 # ============================================================
@@ -962,14 +976,16 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     df_nc['duo_jockey_win_rate'] = df_nc['duo_jockey_win_rate'].fillna(fallback)
 
     # ── Entraîneur stats ─────────────────────────────────────
+    # V7 : entr_win_rate_30j supprimé (redondant) - on garde le fallback pour compat
     if _plat_entr_stats is not None:
         try:
-            df_nc = df_nc.merge(
-                _plat_entr_stats[['entraineur','entr_win_rate_bayes',
-                                  'entr_win_rate_30j']],
-                on='entraineur', how='left')
-        except Exception:
-            pass
+            # Séléction dynamique des colonnes disponibles
+            cols_entr = ['entraineur', 'entr_win_rate_bayes']
+            if 'entr_win_rate_30j' in _plat_entr_stats.columns:
+                cols_entr.append('entr_win_rate_30j')
+            df_nc = df_nc.merge(_plat_entr_stats[cols_entr], on='entraineur', how='left')
+        except Exception as e:
+            print(f"⚠️  PLAT entr merge échoué ({e})")
     for col, val in [('entr_win_rate_bayes', fallback),
                      ('entr_win_rate_30j',   fallback)]:
         if col not in df_nc.columns: df_nc[col] = val
