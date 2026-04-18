@@ -1237,9 +1237,10 @@ def _notes_pmu_galop(df_nc, discipline_raw, date_str, r_num, c_num):
     """Pipeline de scoring et prédiction pour les disciplines galop."""
 
     # ── PLAT V1 Ranking — pipeline dédié ─────────────────────
+    # Accepte 'ranking', 'xgboost', 'lightgbm' (PLAT V8 sauve 'xgboost'/'lightgbm')
     bundle_plat = _models_galop.get('PLAT')
     if discipline_raw == 'PLAT' and bundle_plat and \
-       bundle_plat.get('model_type') == 'ranking':
+       bundle_plat.get('model_type') in ('ranking', 'xgboost', 'lightgbm'):
         return _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num)
 
     # ── MONTE V1 Ranking — pipeline dédié ────────────────────
