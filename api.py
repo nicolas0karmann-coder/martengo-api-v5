@@ -937,11 +937,13 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     df_nc['ecart_cotes_norm'] = (
         (-ec - (-ec).min()) / ((-ec).max() - (-ec).min() + 1e-9)).clip(0, 1)
 
-    # Gains relatifs
-    gains     = df_nc['gains_carriere'].values.astype(float)
-    gains_moy = gains.mean()
+    # Gains relatifs — V8 : gains_par_course au lieu de gains_carriere
+    # Resout biais d'age (vieux chevaux avaient ratio eleve mais top3 faible)
+    gpc = (df_nc['gains_carriere'].values.astype(float) /
+           (df_nc['nb_courses'].values.astype(float) + 1))
+    gpc_moy = gpc.mean()
     df_nc['ratio_gains_peloton'] = (
-        (gains / (gains_moy + 1)).clip(0, 5) / 5 if gains_moy > 0 else 0.5)
+        (gpc / (gpc_moy + 1e-9)).clip(0, 5) / 5 if gpc_moy > 0 else 0.5)
 
     # ── Jockey stats ─────────────────────────────────────────
     if _plat_jockey_stats is not None:
