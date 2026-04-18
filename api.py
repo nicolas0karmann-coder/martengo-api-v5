@@ -1131,11 +1131,21 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
             print(f"⚠️  PLAT feature '{feat}' absente → fallback {fallback:.3f}")
             df_input[feat] = fallback
 
-    scores_bruts = model.predict(df_input[feats])
+    # Détection automatique XGBoost vs LightGBM Booster
+    if hasattr(model, 'predict_proba'):
+        scores_bruts = model.predict(df_input[feats])
+    else:
+        scores_bruts = np.asarray(model.predict(df_input[feats]))
     score_brut   = pd.Series(scores_bruts, index=df_nc.index)
 
-    # Notes sur 20 depuis scores bruts (ranking linéaire)
-    df_nc['note_pmu'] = _proba_to_note_v7(score_brut)
+    # Notes sur 20 depuis scores bruts (ranking linéaire sur le peloton courant)
+    # Normalisation simple pour modèle ranking PLAT (XGBoost ou LightGBM)
+    s_min, s_max = float(score_brut.min()), float(score_brut.max())
+    plage_note = s_max - s_min
+    if plage_note < 1e-6:
+        df_nc['note_pmu'] = 10
+    else:
+        df_nc['note_pmu'] = ((score_brut - s_min) / plage_note * 19 + 1).round().clip(1, 20).astype(int)
 
     # Indice de confiance
     plage_scores = float(score_brut.max() - score_brut.min())
