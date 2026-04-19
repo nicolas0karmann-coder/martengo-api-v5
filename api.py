@@ -893,6 +893,8 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     df_nc['log_montant_prix'] = np.log1p(df_nc['montant_prix'])
     df_nc['nb_partants_c']    = n
     df_nc['est_3ans']         = (df_nc['age'] == 3).astype(float)
+    # V11 : ratio_podiums remplace mus_nb_podiums brute (corr +0.090 -> +0.164)
+    df_nc['ratio_podiums']    = df_nc['mus_nb_podiums'] / (df_nc['mus_nb_courses'] + 1)
 
     # Tranche distance PLAT
     df_nc['tranche_distance'] = pd.cut(df_nc['distance'],
