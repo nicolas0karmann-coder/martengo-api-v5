@@ -906,14 +906,23 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
         labels=['lourd','souple','bon','rapide']).astype(str)
 
     # ── Features relatives au peloton ────────────────────────
-    # Handicap valeur
-    hv       = df_nc['handicap_valeur'].values.astype(float)
-    hv_mean  = hv.mean()
-    hv_std   = hv.std()
-    hv_rank  = pd.Series(hv).rank(ascending=False).values
-    df_nc['rang_handicap_norm']     = 1 - (hv_rank - 1) / max(n - 1, 1)
-    df_nc['ecart_handicap_peloton'] = (
-        (hv - hv_mean) / (hv_std + 1e-9)).clip(-3, 3) / 3 * 0.5 + 0.5
+    # Handicap valeur — V8 : gere les courses sans handicap valide (40% des cas en PLAT)
+    hv = df_nc['handicap_valeur'].values.astype(float)
+    hv_valides = hv[hv > 0]
+    if len(hv_valides) < 2:
+        df_nc['rang_handicap_norm']     = 0.5
+        df_nc['ecart_handicap_peloton'] = 0.5
+    else:
+        hv_for_rank = np.where(hv > 0, hv, np.nan)
+        hv_rank = pd.Series(hv_for_rank).rank(ascending=False, na_option='keep').values
+        n_valides = (~np.isnan(hv_for_rank)).sum()
+        df_nc['rang_handicap_norm'] = np.where(
+            np.isnan(hv_rank), 0.5,
+            1 - (hv_rank - 1) / max(n_valides - 1, 1))
+        hv_mean = hv_valides.mean()
+        hv_std  = hv_valides.std() + 1e-9
+        df_nc['ecart_handicap_peloton'] = np.where(
+            hv > 0, ((hv - hv_mean) / hv_std).clip(-3, 3) / 3 * 0.5 + 0.5, 0.5)
 
     # Poids relatif
     pw      = df_nc['handicap_poids'].values.astype(float)
