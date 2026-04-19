@@ -906,12 +906,12 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
         labels=['lourd','souple','bon','rapide']).astype(str)
 
     # ── Features relatives au peloton ────────────────────────
-    # Handicap valeur — V8 : gere les courses sans handicap valide (40% des cas en PLAT)
+    # Handicap valeur — V11 : ecart_handicap_peloton supprimé (redondant 96% avec rang_handicap_norm)
     hv = df_nc['handicap_valeur'].values.astype(float)
     hv_valides = hv[hv > 0]
     if len(hv_valides) < 2:
         df_nc['rang_handicap_norm']     = 0.5
-        df_nc['ecart_handicap_peloton'] = 0.5
+        df_nc['ecart_handicap_peloton'] = 0.5  # conservé pour compat ancien modèle
     else:
         hv_for_rank = np.where(hv > 0, hv, np.nan)
         hv_rank = pd.Series(hv_for_rank).rank(ascending=False, na_option='keep').values
@@ -919,6 +919,7 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
         df_nc['rang_handicap_norm'] = np.where(
             np.isnan(hv_rank), 0.5,
             1 - (hv_rank - 1) / max(n_valides - 1, 1))
+        # ecart_handicap_peloton conservé pour compat si ancien modèle
         hv_mean = hv_valides.mean()
         hv_std  = hv_valides.std() + 1e-9
         df_nc['ecart_handicap_peloton'] = np.where(
