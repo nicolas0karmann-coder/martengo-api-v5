@@ -954,15 +954,16 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     df_nc['ratio_gains_peloton'] = (
         (gpc / (gpc_moy + 1e-9)).clip(0, 5) / 5 if gpc_moy > 0 else 0.5)
 
-    # ── Jockey stats ─────────────────────────────────────────
+    # ── Jockey stats — V9 : jockey_win_rate_30j supprime (redondant avec bayes) ──
     if _plat_jockey_stats is not None:
         try:
-            df_nc = df_nc.merge(
-                _plat_jockey_stats[['driver','jockey_win_rate_bayes',
-                                    'jockey_win_rate_30j','jockey_n']],
-                on='driver', how='left')
-        except Exception:
-            pass
+            cols_jky = _plat_jockey_stats.columns
+            cols_needed = ['driver', 'jockey_win_rate_bayes']
+            if 'jockey_n' in cols_jky: cols_needed.append('jockey_n')
+            if 'jockey_win_rate_30j' in cols_jky: cols_needed.append('jockey_win_rate_30j')
+            df_nc = df_nc.merge(_plat_jockey_stats[cols_needed], on='driver', how='left')
+        except Exception as e:
+            print(f"⚠️  PLAT jockey_stats merge échoué ({e})")
     for col, val in [('jockey_win_rate_bayes', fallback),
                      ('jockey_win_rate_30j',   fallback),
                      ('jockey_n',              0)]:
