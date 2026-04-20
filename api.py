@@ -480,6 +480,7 @@ _plat_niveau_snap         = None
 _plat_jockey_hippo_stats  = None
 _plat_aptitude_hippo_snap = None
 _plat_confiance_seuils    = {'faible': 0.256, 'moyen': 0.325, 'fort': 0.403}
+_plat_dernier_jockey_snap = None
 
 # Globals MONTE V1 Ranking
 _monte_jockey_stats     = None
@@ -896,12 +897,14 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     # V11 : ratio_podiums remplace mus_nb_podiums brute (corr +0.090 -> +0.164)
     df_nc['ratio_podiums']    = df_nc['mus_nb_podiums'] / (df_nc['mus_nb_courses'] + 1)
 
+    # V15 : changement_jockey supprime du modele (ignore par LightGBM)
+
     # Tranche distance PLAT
     df_nc['tranche_distance'] = pd.cut(df_nc['distance'],
         bins=[0, 1200, 1600, 2000, 9999],
         labels=['sprint','mile','intermediaire','long']).astype(str)
 
-    # Terrain catégorie
+    # Terrain catégorie (V13 : ancien binning sans météo)
     tv = df_nc['terrain_val'].fillna(3.5)
     df_nc['terrain_cat'] = pd.cut(tv,
         bins=[0, 2.0, 3.0, 4.0, 99],
@@ -978,6 +981,11 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     j_rank = pd.Series(jwr).rank(ascending=False).values
     df_nc['rang_jockey_peloton'] = 1 - (j_rank - 1) / max(n - 1, 1)
 
+    # V14 : rang gains_par_course dans le peloton (corr +0.184 vs +0.040 pour brut)
+    gpc = df_nc['gains_par_course'].values.astype(float)
+    g_rank = pd.Series(gpc).rank(ascending=False).values
+    df_nc['rang_gains_peloton'] = 1 - (g_rank - 1) / max(n - 1, 1)
+
     # Duo jockey × cheval
     if _plat_duo_stats is not None:
         try:
@@ -1041,16 +1049,26 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
         df_nc['apt_dist_recente'] = prior
     df_nc['apt_dist_recente'] = df_nc['apt_dist_recente'].fillna(prior)
 
-    # ── Aptitude terrain ─────────────────────────────────────
+    # ── Aptitude terrain — V14 : apt_terrain_actuel depuis snap (nom, terrain_cat) ──
     if _plat_aptitude_terrain is not None:
         try:
             snap = _plat_aptitude_terrain.copy().reset_index(drop=True)
-            if 'aptitude_terrain' in snap.columns:
+            # V14 : snap contient ['nom','terrain_cat','apt_terrain_actuel']
+            if 'apt_terrain_actuel' in snap.columns:
+                df_nc = df_nc.merge(
+                    snap[['nom','terrain_cat','apt_terrain_actuel']],
+                    on=['nom','terrain_cat'], how='left')
+            # Retrocompat : ancien snap avec 'aptitude_terrain'
+            elif 'aptitude_terrain' in snap.columns:
                 df_nc = df_nc.merge(
                     snap[['nom','terrain_cat','aptitude_terrain']],
                     on=['nom','terrain_cat'], how='left')
-        except Exception:
-            pass
+                df_nc['apt_terrain_actuel'] = df_nc['aptitude_terrain']
+        except Exception as e:
+            print(f"⚠️  PLAT apt_terrain merge échoué ({e})")
+    if 'apt_terrain_actuel' not in df_nc.columns: df_nc['apt_terrain_actuel'] = prior
+    df_nc['apt_terrain_actuel'] = df_nc['apt_terrain_actuel'].fillna(prior)
+    # Compat : garder aussi aptitude_terrain pour ancien code
     if 'aptitude_terrain' not in df_nc.columns: df_nc['aptitude_terrain'] = prior
     df_nc['aptitude_terrain'] = df_nc['aptitude_terrain'].fillna(prior)
 
@@ -3532,6 +3550,7 @@ def _charger_stats_plat():
     global _plat_jockey_stats, _plat_duo_stats, _plat_entr_stats
     global _plat_top3_3c_snap, _plat_top3_60j_snap, _plat_regularite_snap
     global _plat_aptitude_terrain, _plat_apt_dist_snap
+    global _plat_dernier_jockey_snap
     global _plat_aptitude_hippo_snap, _plat_jockey_hippo_stats
     global _plat_niveau_lot_snap, _plat_niveau_snap
 
@@ -3603,7 +3622,7 @@ def _charger_modeles_galop():
                 _plat_entr_stats        = bundle.get('entr_stats')
                 _plat_top3_3c_snap      = bundle.get('top3_3courses_snap')
                 _plat_top3_60j_snap     = bundle.get('top3_60j_snap')
-                _plat_aptitude_terrain  = bundle.get('aptitude_terrain_snap')
+                _plat_aptitude_terrain  = bundle.get('apt_terrain_snap') or bundle.get('aptitude_terrain_snap')
                 _plat_aptitude_distance = bundle.get('aptitude_distance_snap')
                 _plat_apt_dist_snap     = bundle.get('apt_dist_snap')
                 _plat_regularite_snap   = bundle.get('regularite_snap')
@@ -3611,6 +3630,7 @@ def _charger_modeles_galop():
                 _plat_niveau_snap       = bundle.get('niveau_snap')
                 _plat_jockey_hippo_stats  = bundle.get('jockey_hippo_stats')
                 _plat_aptitude_hippo_snap = bundle.get('aptitude_hippo_snap')
+                _plat_dernier_jockey_snap = bundle.get('dernier_jockey_snap')
                 if bundle.get('confiance_seuils'):
                     _plat_confiance_seuils = bundle['confiance_seuils']
                 # Note : ces snapshots seront écrasés par _charger_stats_plat()
