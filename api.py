@@ -481,6 +481,7 @@ _plat_jockey_hippo_stats  = None
 _plat_aptitude_hippo_snap = None
 _plat_confiance_seuils    = {'faible': 0.256, 'moyen': 0.325, 'fort': 0.403}
 _plat_dernier_jockey_snap = None
+_plat_apt_type_piste_snap = None
 
 # Globals MONTE V1 Ranking
 _monte_jockey_stats     = None
@@ -904,11 +905,17 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
         bins=[0, 1200, 1600, 2000, 9999],
         labels=['sprint','mile','intermediaire','long']).astype(str)
 
-    # Terrain catégorie (V13 : ancien binning sans météo)
-    tv = df_nc['terrain_val'].fillna(3.5)
+    # V18 : Terrain categorie alignée avec l'entrainement (vraies donnees PMU)
+    tv = pd.to_numeric(df_nc['terrain_val'], errors='coerce').fillna(3.4)
     df_nc['terrain_cat'] = pd.cut(tv,
-        bins=[0, 2.0, 3.0, 4.0, 99],
-        labels=['lourd','souple','bon','rapide']).astype(str)
+        bins=[0, 2.9, 3.3, 3.7, 4.2, 99],
+        labels=['rapide','bon','souple','collant','lourd']).astype(str)
+
+    # V18 : type_piste (HERBE/GAZON/PSF/DIRT/SABLE/INCONNU)
+    if 'type_piste' not in df_nc.columns:
+        df_nc['type_piste'] = 'INCONNU'
+    df_nc['type_piste'] = df_nc['type_piste'].fillna('INCONNU').astype(str)
+    df_nc.loc[df_nc['type_piste'].isin(['nan','None','']), 'type_piste'] = 'INCONNU'
 
     # ── Features relatives au peloton ────────────────────────
     # Handicap valeur — V11 : ecart_handicap_peloton supprimé (redondant 96% avec rang_handicap_norm)
@@ -1079,6 +1086,19 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     # Compat : garder aussi aptitude_terrain pour ancien code
     if 'aptitude_terrain' not in df_nc.columns: df_nc['aptitude_terrain'] = prior
     df_nc['aptitude_terrain'] = df_nc['aptitude_terrain'].fillna(prior)
+
+    # V18 : apt_type_piste (aptitude cheval x type_piste)
+    if _plat_apt_type_piste_snap is not None:
+        try:
+            snap_tp = _plat_apt_type_piste_snap.copy().reset_index(drop=True)
+            if 'apt_type_piste' in snap_tp.columns:
+                df_nc = df_nc.merge(
+                    snap_tp[['nom','type_piste','apt_type_piste']],
+                    on=['nom','type_piste'], how='left')
+        except Exception as e:
+            print(f"⚠️  PLAT apt_type_piste merge échoué ({e})")
+    if 'apt_type_piste' not in df_nc.columns: df_nc['apt_type_piste'] = prior
+    df_nc['apt_type_piste'] = df_nc['apt_type_piste'].fillna(prior)
 
     # ── Aptitude distance ────────────────────────────────────
     if _plat_aptitude_distance is not None:
@@ -3558,7 +3578,7 @@ def _charger_stats_plat():
     global _plat_jockey_stats, _plat_duo_stats, _plat_entr_stats
     global _plat_top3_3c_snap, _plat_top3_60j_snap, _plat_regularite_snap
     global _plat_aptitude_terrain, _plat_apt_dist_snap
-    global _plat_dernier_jockey_snap
+    global _plat_dernier_jockey_snap, _plat_apt_type_piste_snap
     global _plat_aptitude_hippo_snap, _plat_jockey_hippo_stats
     global _plat_niveau_lot_snap, _plat_niveau_snap
 
@@ -3631,6 +3651,7 @@ def _charger_modeles_galop():
                 _plat_top3_3c_snap      = bundle.get('top3_3courses_snap')
                 _plat_top3_60j_snap     = bundle.get('top3_60j_snap')
                 _plat_aptitude_terrain  = bundle.get('apt_terrain_snap') or bundle.get('aptitude_terrain_snap')
+                _plat_apt_type_piste_snap = bundle.get('apt_type_piste_snap')
                 _plat_aptitude_distance = bundle.get('aptitude_distance_snap')
                 _plat_apt_dist_snap     = bundle.get('apt_dist_snap')
                 _plat_regularite_snap   = bundle.get('regularite_snap')
