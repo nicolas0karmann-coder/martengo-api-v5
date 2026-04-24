@@ -999,20 +999,28 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
     df_nc['duo_jockey_win_rate'] = df_nc['duo_jockey_win_rate'].fillna(fallback)
 
     # ── Entraîneur stats ─────────────────────────────────────
-    # V7 : entr_win_rate_30j supprimé (redondant) - on garde le fallback pour compat
+    # V17 : ajout entr_forme_60j (forme récente de l'écurie)
     if _plat_entr_stats is not None:
         try:
-            # Séléction dynamique des colonnes disponibles
             cols_entr = ['entraineur', 'entr_win_rate_bayes']
             if 'entr_win_rate_30j' in _plat_entr_stats.columns:
                 cols_entr.append('entr_win_rate_30j')
+            if 'entr_forme_60j' in _plat_entr_stats.columns:
+                cols_entr.append('entr_forme_60j')
             df_nc = df_nc.merge(_plat_entr_stats[cols_entr], on='entraineur', how='left')
         except Exception as e:
             print(f"⚠️  PLAT entr merge échoué ({e})")
     for col, val in [('entr_win_rate_bayes', fallback),
-                     ('entr_win_rate_30j',   fallback)]:
+                     ('entr_win_rate_30j',   fallback),
+                     ('entr_forme_60j',      fallback)]:
         if col not in df_nc.columns: df_nc[col] = val
         df_nc[col] = df_nc[col].fillna(val)
+
+    # V17 : rang_entraineur_peloton (rang de entr_win_rate_bayes dans peloton)
+    # Résiduelle +0.059 au-delà de entr_win_rate_bayes
+    ewr = df_nc['entr_win_rate_bayes'].values.astype(float)
+    e_rank = pd.Series(ewr).rank(ascending=False).values
+    df_nc['rang_entraineur_peloton'] = 1 - (e_rank - 1) / max(n - 1, 1)
 
     # ── Forme récente ─────────────────────────────────────────
     if _plat_top3_3c_snap is not None:
