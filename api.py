@@ -268,19 +268,31 @@ def predict():
     """
     Body JSON : { "chevaux": [{"numero":1,"note":15,"rapport":12.5}, ...] }
     """
+    if model is None or modele_abs is None:
+        return jsonify({"error": "Modèles non disponibles — historique insuffisant ou en cours de chargement"}), 503
+
     data = request.get_json()
     chevaux = data.get('chevaux', [])
     if not chevaux:
         return jsonify({"error": "Aucun cheval fourni"}), 400
 
     df_nc = pd.DataFrame(chevaux)
-    df_nc, _, _ = _enrichir(df_nc, note_mean, note_std)
+
+    # Normalisation pour le modèle principal (utilise note_mean/note_std du modèle principal)
+    nm = note_mean if note_mean != 0.0 else None
+    ns = note_std  if note_std  != 0.0 else None
+    df_nc, _, _ = _enrichir(df_nc, nm, ns)
 
     # Modèle principal
     df_nc['proba_principal'] = model.predict_proba(df_nc[FEATURES])[:, 1]
 
+    # Modèle absolu — re-enrichir avec les paramètres propres à ce modèle
+    nma = note_mean_a if note_mean_a != 0.0 else None
+    nsa = note_std_a  if note_std_a  != 0.0 else None
+    df_nc_a, _, _ = _enrichir(pd.DataFrame(chevaux), nma, nsa)
+
     # Modèle absolu
-    df_nc['proba_absolu'] = modele_abs.predict_proba(df_nc[FEATURES_ABSOLU])[:, 1]
+    df_nc['proba_absolu'] = modele_abs.predict_proba(df_nc_a[FEATURES_ABSOLU])[:, 1]
 
     # Top 3 principal (cote > 10)
     candidats = df_nc[df_nc['rapport'] > 10].copy()
@@ -866,6 +878,32 @@ def _proba_to_note_v7(scores_series, proba_min_ref=None, proba_max_ref=None):
 
 
 
+
+def _calculer_proba_win_ev(df_nc, score_brut):
+    """
+    Calcule proba_win (softmax normalisé) et ev_win pour tous les pipelines.
+    - score_brut : pd.Series des scores bruts du modèle (ranking ou classification)
+    - Normalise dans [0,1] avant softmax pour être stable quelle que soit l'amplitude
+    - T=3.0 : bonne discrimination sans écraser les outsiders
+    """
+    s_arr = score_brut.values.astype(float)
+    s_min_w, s_max_w = s_arr.min(), s_arr.max()
+    plage_w = s_max_w - s_min_w
+    if plage_w < 1e-6:
+        proba_win_arr = np.full(len(s_arr), 1.0 / len(s_arr))
+    else:
+        s_norm = (s_arr - s_min_w) / plage_w
+        exp_s = np.exp(s_norm * 2.0)  # T calibre : optimal sur 90j validation (Brier 0.09111 vs 0.09236 pour T=3.0)
+        proba_win_arr = exp_s / exp_s.sum()
+    df_nc['proba_win'] = proba_win_arr
+    if '_cote_app' in df_nc.columns:
+        cote_clip = df_nc['_cote_app'].fillna(10.0).clip(1.1, 200)
+        df_nc['ev_win'] = df_nc['proba_win'] * cote_clip - 1
+    else:
+        df_nc['ev_win'] = 0.0
+    return df_nc
+
+
 def _norm_g(s, lo, hi):
     return ((s.clip(lo, hi) - lo) / (hi - lo + 1e-9)).clip(0, 1)
 
@@ -1247,6 +1285,9 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
         score_final = score_brut
     df_nc['proba_pmu'] = score_final
 
+    # ── Probabilités WIN et EV ──
+    df_nc = _calculer_proba_win_ev(df_nc, score_brut)
+
     # Score value
     if '_cote_app' in df_nc.columns:
         cote_val = df_nc['_cote_app'].fillna(10.0).clip(1.1, 200)
@@ -1272,18 +1313,19 @@ def _notes_pmu_plat_v1(df_nc, date_str, r_num, c_num):
             "nom":       str(row['nom']),
             "note_pmu":  int(row['note_pmu']),
             "proba_pmu": round(float(row['proba_pmu']) * 100, 1) if pd.notna(row['proba_pmu']) else 0,
+            "proba_win": round(float(row['proba_win']) * 100, 1) if pd.notna(row.get('proba_win')) else 0,
+            "ev_win":    round(float(row['ev_win']) * 100, 1) if pd.notna(row.get('ev_win')) else 0,
             "driver":    str(row['driver']),
             "cote":      float(row['_cote_app']) if pd.notna(row.get('_cote_app')) else None,
             "avis":      int(row['avis_entraineur']) if pd.notna(row.get('avis_entraineur')) else 0,
             "scores": {
-                "forme":      int(round(float(row['score_forme'])     * 100)),
-                "duo":        int(round(float(row['score_jockey'])    * 100)),
-                "jockey":     int(round(float(row['score_jockey'])    * 100)),
-                "historique": int(round(float(row['score_historique'])* 100)),
-                "gains":      int(round(float(row['score_gains'])     * 100)),
-                "handicap":   int(round(float(row['score_handicap'])  * 100)),
-                "niveau":     int(round(float(row['score_niveau'])    * 100)),
-                "cote":       int(round(float(row['score_cote'])      * 100)),
+                "forme":      int(round(float(row.get('score_forme', 0))      * 100)),
+                "jockey":     int(round(float(row.get('score_jockey', 0))     * 100)),
+                "handicap":   int(round(float(row.get('score_handicap', 0))   * 100)),
+                "historique": int(round(float(row.get('score_historique', 0)) * 100)),
+                "gains":      int(round(float(row.get('score_gains', 0))      * 100)),
+                "niveau":     int(round(float(row.get('score_niveau', 0))     * 100)),
+                "cote":       0,
             },
             "taux_disq":       round(float(row['mus_taux_disq']) * 100, 1) if pd.notna(row.get('mus_taux_disq')) else 0,
             "musique":         str(row.get('musique', '')) if row.get('musique') else '',
@@ -2635,6 +2677,8 @@ def notes_pmu():
 
     df_nc['proba_pmu'] = score_final
 
+    # ── Probabilités WIN et EV ──
+    df_nc = _calculer_proba_win_ev(df_nc, score_final)
 
     # ── Résultat JSON (scores détaillés inclus) ───────────────
     result = []
@@ -2644,6 +2688,8 @@ def notes_pmu():
             "nom":       str(row['nom']),
             "note_pmu":  int(row['note_pmu']),
             "proba_pmu": round(float(row['proba_pmu']) * 100, 1) if pd.notna(row['proba_pmu']) else 0,
+            "proba_win": round(float(row['proba_win']) * 100, 1) if pd.notna(row.get('proba_win')) else 0,
+            "ev_win":    round(float(row['ev_win']) * 100, 1) if pd.notna(row.get('ev_win')) else 0,
             "driver":    str(row['driver']),
             "cote":      float(row['_cote_app']) if pd.notna(row['_cote_app']) else None,
             "avis":      int(row['avis_entraineur']) if pd.notna(row['avis_entraineur']) else 0,
@@ -3079,6 +3125,7 @@ def _notes_pmu_haie_v1(df_nc, date_str, r_num, c_num):
     else:
         score_final = score_brut
     df_nc['proba_pmu'] = score_final
+    df_nc = _calculer_proba_win_ev(df_nc, score_brut)
 
     if '_cote_app' in df_nc.columns:
         cote_val = df_nc['_cote_app'].fillna(10.0).clip(1.1,200)
@@ -3103,6 +3150,8 @@ def _notes_pmu_haie_v1(df_nc, date_str, r_num, c_num):
             "nom":       str(row['nom']),
             "note_pmu":  int(row['note_pmu']),
             "proba_pmu": round(float(row['proba_pmu'])*100,1) if pd.notna(row['proba_pmu']) else 0,
+            "proba_win": round(float(row['proba_win'])*100,1) if pd.notna(row.get('proba_win')) else 0,
+            "ev_win":    round(float(row['ev_win'])*100,1) if pd.notna(row.get('ev_win')) else 0,
             "driver":    str(row['driver']),
             "cote":      float(row['_cote_app']) if pd.notna(row.get('_cote_app')) else None,
             "avis":      0,
@@ -3413,6 +3462,7 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
     else:
         score_final = score_brut
     df_nc['proba_pmu'] = score_final
+    df_nc = _calculer_proba_win_ev(df_nc, score_brut)
 
     if '_cote_app' in df_nc.columns:
         cote_val = df_nc['_cote_app'].fillna(10.0).clip(1.1,200)
@@ -3436,6 +3486,8 @@ def _notes_pmu_monte_v1(df_nc, date_str, r_num, c_num):
             "nom":       str(row['nom']),
             "note_pmu":  int(row['note_pmu']),
             "proba_pmu": round(float(row['proba_pmu'])*100,1) if pd.notna(row['proba_pmu']) else 0,
+            "proba_win": round(float(row['proba_win'])*100,1) if pd.notna(row.get('proba_win')) else 0,
+            "ev_win":    round(float(row['ev_win'])*100,1) if pd.notna(row.get('ev_win')) else 0,
             "driver":    str(row['driver']),
             "cote":      float(row['_cote_app']) if pd.notna(row.get('_cote_app')) else None,
             "avis":      int(row['avis_entraineur']) if pd.notna(row.get('avis_entraineur')) else 0,
